@@ -2,7 +2,7 @@ import json
 import sqlite3
 
 from webhook_receiver.common.clock import Clock
-from webhook_receiver.common.db import ConnectionPool, immediate
+from webhook_receiver.common.db import ConnectionPool, immediate, read_txn
 from webhook_receiver.common.models import (
     Event,
     PurgeResult,
@@ -33,7 +33,7 @@ RECOVER_FAIL_SQL = (
 )
 
 STATS_READY_SQL = (
-    "SELECT status, COUNT(*) AS n FROM webhook_events"
+    "SELECT status, COUNT(*) FROM webhook_events"
     " WHERE status IN ('pending', 'retrying') GROUP BY status"
 )
 STATS_PROCESSING_SQL = (
@@ -214,9 +214,8 @@ class EventRepository:
         """Counts of unfinished events and age of the oldest due work."""
         now = self._clock.now_ms()
         conn = self._pool.get()
-        # One read transaction so all four queries see the same snapshot.
-        conn.execute("BEGIN")
-        try:
+        # One read snapshot so all four queries agree with each other.
+        with read_txn(conn):
             ready = dict(conn.execute(STATS_READY_SQL).fetchall())
             (processing,) = conn.execute(STATS_PROCESSING_SQL).fetchone()
             params = {"now": now}
@@ -224,8 +223,6 @@ class EventRepository:
             (oldest_leased,) = conn.execute(
                 OLDEST_LEASED_SQL, params
             ).fetchone()
-        finally:
-            conn.execute("COMMIT")
         due = [t for t in (oldest_ready, oldest_leased) if t is not None]
         return QueueStats(
             pending=ready.get("pending", 0),

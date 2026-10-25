@@ -10,6 +10,7 @@ from webhook_receiver.common.db import (
     connect,
     immediate,
     init_schema,
+    read_txn,
 )
 from webhook_receiver.common.models import Event, Status
 
@@ -302,3 +303,74 @@ def test_concurrent_connect_on_fresh_files(tmp_path):
         t.start()
     _join_all(threads)
     assert errors == []
+
+
+def test_read_txn_commits_and_closes_transaction(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
+    init_schema(conn)
+    with read_txn(conn) as c:
+        assert c is conn
+        assert conn.in_transaction
+        c.execute("SELECT COUNT(*) FROM webhook_events").fetchone()
+    assert not conn.in_transaction
+
+
+def test_read_txn_is_deferred(tmp_path, open_db):
+    first = open_db(tmp_path / "a.db")
+    init_schema(first)
+    second = open_db(tmp_path / "a.db")
+    with read_txn(first):
+        first.execute("SELECT COUNT(*) FROM webhook_events").fetchone()
+        # A read snapshot must not block writers.
+        with immediate(second):
+            _insert(second)
+
+
+def test_read_txn_propagates_error_and_rolls_back(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
+    init_schema(conn)
+    with pytest.raises(ValueError, match="boom"):
+        with read_txn(conn):
+            raise ValueError("boom")
+    assert not conn.in_transaction
+
+
+class _ReadConn:
+    """Fake connection that mimics SQLite's 'no transaction' errors."""
+
+    def __init__(self, rollback_error=None):
+        self.in_transaction = False
+        self.statements = []
+        self.rollback_error = rollback_error
+
+    def execute(self, sql):
+        self.statements.append(sql)
+        if sql == "BEGIN":
+            self.in_transaction = True
+            return
+        if not self.in_transaction:
+            raise sqlite3.OperationalError(
+                "cannot commit - no transaction is active"
+            )
+        if sql == "ROLLBACK" and self.rollback_error is not None:
+            raise self.rollback_error
+        self.in_transaction = False
+
+
+def test_read_txn_does_not_mask_error_after_auto_rollback():
+    conn = _ReadConn()
+    original = sqlite3.DatabaseError("database disk image is malformed")
+    with pytest.raises(sqlite3.DatabaseError) as info:
+        with read_txn(conn):
+            conn.in_transaction = False  # SQLite already rolled back
+            raise original
+    assert info.value is original
+    assert conn.statements == ["BEGIN"]
+
+
+def test_read_txn_swallows_rollback_error():
+    conn = _ReadConn(rollback_error=sqlite3.OperationalError("io"))
+    with pytest.raises(ValueError, match="boom"):
+        with read_txn(conn):
+            raise ValueError("boom")
+    assert conn.statements == ["BEGIN", "ROLLBACK"]

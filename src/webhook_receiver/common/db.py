@@ -104,6 +104,22 @@ def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
 
 
+@contextmanager
+def read_txn(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Deferred transaction: a consistent read snapshot, no write lock."""
+    conn.execute("BEGIN")
+    try:
+        yield conn
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass  # keep the original exception
+        raise
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     with immediate(conn):
         for statement in SCHEMA_SQL.split(";"):

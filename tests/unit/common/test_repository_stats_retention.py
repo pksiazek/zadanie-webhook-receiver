@@ -285,3 +285,11 @@ def test_stats_and_purge_queries_use_indexes(repo):
         details = [row["detail"] for row in plan]
         assert not any(_is_full_scan(d) for d in details), (sql, details)
         assert any(index in d for d in details), (sql, details)
+        if index == "ix_events_finished":
+            # Retention must seek by (status, finished_at), not walk the
+            # whole finished index.
+            assert any(
+                d.startswith("SEARCH webhook_events")
+                and f"INDEX {index} (status=?" in d
+                for d in details
+            ), (sql, details)
