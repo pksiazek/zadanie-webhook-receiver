@@ -598,6 +598,48 @@ Narzędzie: pytest. Kluczowe obszary:
   - **`synchronous=FULL`** — dlaczego nie `NORMAL`, z pomiarem kosztu.
   - **Schemat** — uzasadnienia z §7: `id` obok klucza, czasy INTEGER ms,
     `STRICT`, scalenie terminów w `run_at`, ogrodzenie numerem próby.
+  - **SQLite współdzielony przez kilka kontenerów: ograniczenia**
+    [ustalone].
+
+    Dlaczego to działa: kontenery na jednym hoście współdzielą jądro
+    Linuksa. SQLite synchronizuje procesy blokadami plików (POSIX `fcntl`),
+    a w trybie WAL także plikiem pamięci współdzielonej `-shm` mapowanym
+    przez `mmap`. Dla jądra nie ma różnicy, czy procesy są w jednym
+    kontenerze, czy w kilku.
+
+    Ograniczenia i warunki poprawności:
+
+    - **Tylko jeden host.** Workerów nie da się rozłożyć na kilka maszyn.
+      Baza na NFS lub innym sieciowym systemie plików jest niedozwolona,
+      bo blokady i `mmap` są tam zawodne i grożą uszkodzeniem bazy. Dalsze
+      skalowanie to PostgreSQL (`SELECT … FOR UPDATE SKIP LOCKED`) albo
+      broker z outboxem (→ TODO).
+    - **Nazwany wolumen Dockera, nie bind mount.** Na macOS (OrbStack,
+      Docker Desktop) bind mount przechodzi przez warstwę współdzielenia
+      plików z hostem, gdzie semantyka blokad nie jest gwarantowana.
+      Nazwany wolumen leży na lokalnym systemie plików linuksowej maszyny
+      wirtualnej.
+    - **Prawo zapisu do katalogu bazy we wszystkich kontenerach**, nie
+      tylko do pliku, bo SQLite tworzy obok pliki `-wal` i `-shm`.
+      Zapewnia to jeden obraz i ten sam UID dla api i workerów.
+    - **Jeden pisarz naraz.** SQLite serializuje transakcje zapisujące.
+      Przy większej liczbie workerów rośnie czas oczekiwania na blokadę i
+      przepustowość przestaje rosnąć liniowo. Przy ~17 zdarzeniach/s zapas
+      jest duży, a sufit wyznacza benchmark nr 3 (rywalizacja przy
+      1/2/4/8 procesach).
+    - **`busy_timeout=5000`** łagodzi chwilową rywalizację, bo proces czeka
+      zamiast od razu dostać `database is locked`. Przy trwałym
+      przeciążeniu zapisu pojawią się jednak błędy i opóźnienia, a nie
+      cicha utrata danych.
+    - **Poprawność logiczna nie zależy od liczby kontenerów:** atomowe
+      pobieranie pracy (`UPDATE … RETURNING` w `BEGIN IMMEDIATE`) i
+      warunkowy zapis wyniku (ogrodzenie numerem próby `attempts`).
+
+    Stan weryfikacji: recenzent zmierzył 3 procesy piszące w jednym
+    kontenerze (WAL, `synchronous=FULL`, 600/600 wierszy, ~1300 tx/s).
+    Wariant z osobnymi kontenerami na wspólnym wolumenie potwierdzają
+    scenariusz `scaling` (§13) i benchmark nr 3 (§13a). README podaje ich
+    wyniki jako dowód.
   - Semantykę „dokładnie raz” (§4), dwuprogową retencję (§11), jeden
     proces uvicorn (§3), granicę jednego hosta (§16).
 - Ten dokument i zapis brainstormingu w `docs/superpowers/specs/`.

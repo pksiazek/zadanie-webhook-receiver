@@ -377,3 +377,19 @@ o zapis przy 1/2/4/8 procesach; koszt porcji retencji. Ręcznie, poza CI,
 wyniki w README.
 
 **Decyzja: wszystkie cztery.**
+
+## 20. SQLite współdzielony przez kilka kontenerów
+
+Użytkownik przekazał treść nowego punktu do sekcji tradeoffów README (§15):
+„SQLite współdzielony przez kilka kontenerów: ograniczenia”.
+
+Zawartość: dlaczego to działa (wspólne jądro, blokady POSIX `fcntl`,
+`-shm` przez `mmap`); warunki poprawności: tylko jeden host (bez NFS),
+nazwany wolumen zamiast bind mounta, prawo zapisu do katalogu bazy (ten
+sam obraz i UID), jeden pisarz naraz (sufit z benchmarku nr 3),
+`busy_timeout` łagodzi chwilową rywalizację, poprawność logiczna
+niezależna od liczby kontenerów (atomowy claim, ogrodzenie `attempts`);
+stan weryfikacji: pomiar recenzenta w jednym kontenerze, wariant
+wielokontenerowy potwierdzą scenariusz `scaling` i benchmark nr 3.
+
+**Decyzja: dopisane do §15 jako obowiązkowy punkt README [ustalone].**
