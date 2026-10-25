@@ -183,4 +183,48 @@ API na potrzeby developmentu).
 
 ## 11. Builder check
 
-_(uzupełniane po recenzji)_
+Recenzent (świeży subagent, model Fable, effort high) przeczytał dokument,
+gist i devcontainer; empirycznie sprawdził, że SQLite WAL z 3 procesami
+piszącymi i `synchronous=FULL` działa na tym systemie plików (~1300 tx/s).
+Sesja recenzenta została raz przerwana (koniec sesji Claude Code) i
+wznowiona z zachowanego zapisu.
+
+### Pytania do użytkownika
+
+1. **Docker nie istnieje w devcontainerze** — nie da się zweryfikować
+   Dockerfile/compose/testu obciążeniowego. Omówione opcje:
+   - `docker-outside-of-docker` — gniazdo demona hosta (OrbStack); w
+     praktyce uprawnienia roota na hoście: dostęp do wszystkich kontenerów,
+     obrazów, wolumenów i (przez OrbStack) plików macOS; porty na hoście
+     (`host.docker.internal`).
+   - `docker-in-docker` — osobny demon w kontenerze (wymaga
+     `--privileged`); brak dostępu do zasobów hosta, wszystko potrzebne
+     działa w środku; koszt: osobny cache obrazów.
+
+   Rekomendacja zmieniona na docker-in-docker. **Decyzja: docker-in-docker.**
+
+2. **Kryteria testu obciążeniowego.** Propozycja: p99 `POST` < 100 ms przy
+   1000/min, zero nie-2xx, ślady do Jaegera podczas pomiaru.
+   Użytkownik zaproponował bardziej złożony scenariusz burst:
+   (1) 2 min po 3000, (2) potem 100 do zejścia kolejki do ~100,
+   (3) czekanie na zero; poprosił o limity czasowe.
+   Wyjaśniono dwuznaczność fazy 1 (3000 łącznie vs 3000/min) z wyliczeniem
+   — przy 1 workerze (~1100/min) wariant 3000/min daje kolejkę ~3800 i
+   czytelny spadek ~4 min. Zaproponowano limity: faza 2 ≤ 10 min,
+   faza 3 ≤ 2 min, całość ≤ 15 min.
+   **Decyzja: faza 1 = 3000/min przez 2 min; progi i limity zaakceptowane.**
+
+### Rozstrzygnięte przez projektanta (oznaczone w dokumencie)
+
+- `/ready` API nie zależy od workera (zgodnie z izolacją przyjmowania);
+  stan workerów informacyjnie w ciele i metryce.
+- Gauge'e kolejki wystawione na `/metrics` API — źródło dla testu
+  obciążeniowego i dyżurnego; port metryk workera niepublikowany na hoście
+  (konflikt z `--scale`).
+- Konfigurowalna baza/limit backoffu (szybkie testy `fail_always`).
+- Ograniczony zestaw znaków `idempotency_key` (klucz w ścieżce URL).
+- Ujednolicone nazwy pól (`finished_at`, `payload_purged`).
+- `stop_grace_period: 20s` > `SHUTDOWN_GRACE`.
+- Nazwy instrumentów OTel bez sufiksów (eksporter Prometheus je dokleja).
+- Jeden proces uvicorn dla API (stan limitera w pamięci).
+- Jeden span `webhook.process` na próbę, dziecko spana żądania.

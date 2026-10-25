@@ -67,7 +67,16 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
   uruchomienia i sekcją TODO [wymóg].
 - Budżet zadania 2–4 h; zakres bonusowy świadomie go przekracza [ustalone].
 - SQLite działa poprawnie między procesami tylko na lokalnym systemie plików
-  jednego hosta (nie na NFS) — determinuje granicę skalowania.
+  jednego hosta (nie na NFS) — determinuje granicę skalowania. W compose
+  baza leży na **nazwanym wolumenie**, nie na bind mouncie.
+- Devcontainer nie ma Dockera. Żeby Dockerfile, compose i test obciążeniowy
+  dało się zweryfikować w środowisku pracy, **pierwszym krokiem
+  implementacji jest dodanie feature `docker-in-docker` do devcontainera**
+  i jego przebudowa [ustalone]. Wybrane zamiast `docker-outside-of-docker`,
+  bo nie daje dostępu do demona i plików hosta.
+- API uruchamiane jako **jeden proces uvicorn** (bez `--workers N`): rate
+  limiter i cache licznika zaległości żyją w pamięci procesu. Skalowanie API
+  wymagałoby współdzielonego stanu (→ TODO) [decyzja projektanta].
 
 ## 4. Semantyka „dokładnie raz” — co naprawdę gwarantujemy
 
@@ -135,7 +144,10 @@ Ciało:
 }
 ```
 
-Walidacja: `idempotency_key` — niepusty string, maks. 255 znaków;
+Walidacja: `idempotency_key` — dopasowany do `^[A-Za-z0-9._:-]{1,255}$`
+(klucz trafia do ścieżki URL i nagłówka `Location`, więc bez znaków
+wymagających kodowania) [decyzja projektanta]; `X-Source` — ten sam zestaw
+znaków, maks. 64;
 `event_type` — niepusty string; `payload` — obiekt JSON. Limit rozmiaru
 ciała: 256 KiB → `413` [decyzja projektanta]. Błędy walidacji → `422`.
 
@@ -176,20 +188,31 @@ Wymaga `X-Source` (klucz jest unikalny w obrębie nadawcy). Zwraca:
   "result": null,
   "created_at": "...",
   "updated_at": "...",
-  "completed_at": null,
+  "finished_at": null,
   "payload_purged": false
 }
 ```
 
-Nieznany klucz → `404`.
+`finished_at` odpowiada kolumnie o tej samej nazwie (moment wejścia w
+`completed` lub `failed`); `payload_purged` = `payload_purged_at IS NOT
+NULL`. Nieznany klucz → `404`.
 
 ### Endpointy operacyjne
 
 - `GET /health` — liveness: proces odpowiada.
-- `GET /ready` — readiness: baza dostępna (zapytanie), migracja schematu
-  wykonana, świeży heartbeat co najmniej jednego workera (< 15 s)
-  [decyzja projektanta]. Inaczej `503` z listą niespełnionych warunków.
-- `GET /metrics` — metryki w formacie Prometheus (eksporter OpenTelemetry).
+- `GET /ready` — readiness API: baza dostępna (zapytanie) i schemat
+  zainicjalizowany; inaczej `503` z listą niespełnionych warunków.
+  **Brak workera nie wpływa na gotowość API** — przyjmowanie ma działać
+  niezależnie od przetwarzania (to cel architektury B). Stan workerów jest
+  raportowany informacyjnie w ciele odpowiedzi (`workers_alive`, wiek
+  najświeższego heartbeatu) oraz metryką [decyzja projektanta, po
+  recenzji].
+- `GET /metrics` — metryki w formacie Prometheus (eksporter OpenTelemetry),
+  **w tym gauge'e kolejki** (`webhook_queue_depth{status}`,
+  `webhook_queue_oldest_pending_age_seconds`, `webhook_workers_alive`)
+  liczone z tego samego cache co backpressure. To jedno miejsce, z którego
+  dyżurny i test obciążeniowy czytają stan kolejki, niezależnie od liczby
+  workerów [decyzja projektanta, po recenzji].
 
 ## 7. Model danych (SQLite)
 
@@ -269,7 +292,9 @@ starcie każdego procesu [decyzja projektanta]; narzędzie migracji → TODO.
 
 Parametry domyślne (konfigurowalne) [decyzja projektanta]:
 `MAX_ATTEMPTS=5`, `LEASE_SECONDS=30` (> maks. czasu symulacji 5 s),
-backoff `min(2 s · 2^(attempts−1), 60 s)` z jitterem ±20%.
+backoff `min(BACKOFF_BASE · 2^(attempts−1), BACKOFF_MAX)` z jitterem ±20%,
+`BACKOFF_BASE=2 s`, `BACKOFF_MAX=60 s`. Baza i limit backoffu są
+konfigurowalne, żeby testy i demo `fail_always` nie trwały ~50 s.
 
 Duplikat w dowolnym stanie dostaje aktualny status.
 
@@ -285,11 +310,16 @@ Duplikat w dowolnym stanie dostaje aktualny status.
 - Heartbeat do `worker_heartbeats` co 5 s.
 - Graceful shutdown (SIGTERM): przestaje pobierać, czeka na trwające zadania
   do `SHUTDOWN_GRACE` (10 s); niedokończone odzyskają się po wygaśnięciu
-  rezerwacji.
-- Zadanie retencji uruchamiane periodycznie w workerze (co 10 min) — patrz §11.
+  rezerwacji. W compose `stop_grace_period: 20s` (> `SHUTDOWN_GRACE`), żeby
+  Docker nie zabił workera SIGKILL-em w trakcie kończenia.
+- Zadanie retencji uruchamiane periodycznie w workerze (co 10 min) — patrz
+  §11. Przy wielu workerach każdy może je uruchomić; operacja jest
+  idempotentna, więc to bezpieczne.
 - Pomocniczy serwer HTTP na `WORKER_METRICS_PORT` (domyślnie 9100) z
-  `/metrics` i `/health` dla metryk wewnątrz procesu workera [decyzja
-  projektanta].
+  `/metrics` (metryki procesu workera: czasy przetwarzania, wyniki prób) i
+  `/health` — dostępny w sieci compose, **niepublikowany na hoście**, żeby
+  `--scale worker=N` nie kolidował o port [decyzja projektanta, po
+  recenzji].
 - Skalowanie: `docker compose up --scale worker=N`; poprawność gwarantuje
   atomowy claim w SQLite.
 
@@ -355,10 +385,12 @@ zapisu na długo.
   - `opentelemetry-instrumentation-fastapi` — span dla każdego żądania.
   - Przy przyjęciu nowego zdarzenia bieżący kontekst zapisywany w kolumnie
     `traceparent` (format W3C) [ustalone — obowiązkowe].
-  - Worker przy przetwarzaniu odtwarza kontekst z `traceparent` i tworzy span
-    `webhook.process` jako dziecko spana żądania; każda próba to osobny span
-    z atrybutami `attempt`, `idempotency_key`, `source`, `event_type`,
-    wynikiem/błędem. Efekt: jeden ślad od `POST` przez wszystkie próby.
+  - Worker przy każdej próbie odtwarza kontekst z `traceparent` i tworzy
+    **jeden span `webhook.process` na próbę**, jako bezpośrednie dziecko
+    (już zakończonego) spana żądania — próby dzieli czas i proces, więc nie
+    ma długo żyjącego spana-rodzica. Atrybuty: `attempt`,
+    `idempotency_key`, `source`, `event_type`, wynik/błąd. Efekt: jeden ślad
+    od `POST` przez wszystkie próby.
   - Atrybuty spanów nie zawierają payloadu (dane osobowe).
 - **Metryki** (OTel SDK, eksport Prometheus na `/metrics`):
   - `webhooks_received_total{source, outcome=accepted|duplicate|conflict|rate_limited|backpressure|invalid}`
@@ -368,6 +400,14 @@ zapisu na długo.
   - `webhook_queue_oldest_pending_age_seconds` (gauge — najważniejszy sygnał
     „kolejka nie nadąża”)
   - `webhook_lease_recoveries_total`
+  - `webhook_workers_alive` (gauge z tabeli heartbeatów)
+  - Uwaga implementacyjna: eksporter Prometheus z OTel sam dokleja `_total`
+    do liczników i jednostkę do histogramów — instrumenty nazywamy bez
+    sufiksów (`webhooks_received`, `webhook_processing_duration` z jednostką
+    `s`), żeby na `/metrics` wyszły nazwy jak wyżej. Pakiety
+    instrumentacji (`0.xxbN`) przypięte do pasującej wersji SDK.
+  - Gauge'e kolejki na `/metrics` API (patrz §6), metryki przetwarzania na
+    `/metrics` workera.
 - **Logi:** strukturalny JSON na stdout, w każdym wpisie `trace_id`,
   `span_id`, `idempotency_key`, `source`; zdarzenia: przyjęcie, duplikat,
   konflikt, claim, wynik próby, odzyskanie rezerwacji, retencja.
@@ -387,17 +427,38 @@ Cele [ustalone]:
    spadku ruchu kolejka **spokojnie schodzi** do zera; nic nie ginie.
 
 Narzędzie [decyzja projektanta]: własny skrypt asyncio + `httpx` z modelem
-otwartym (stałe tempo napływu, niezależne od czasu odpowiedzi), kilka
-wartości `X-Source`. Scenariusze:
+otwartym (stałe tempo napływu, niezależne od czasu odpowiedzi), 5 wartości
+`X-Source` (przy 3000/min ≈ 10 żądań/s na źródło — poniżej limitu 50/s,
+więc rate limiting nie fałszuje wyniku). Głębokość kolejki próbkowana co
+1 s z `/metrics` API. Wszystkie tempa, czasy i progi to flagi skryptu.
 
-- `steady`: 1000/min przez 3 min.
-- `burst`: np. 3000/min przez 2 min, potem 0 — obserwacja spadku kolejki.
+Środowisko: `docker compose` (api + 1 worker + Jaeger) w devcontainerze z
+docker-in-docker; podczas pomiaru ślady eksportowane do Jaegera (OTLP), nie
+do konsoli, bo wypisywanie spanów na stdout zawyża p99 [ustalone].
 
-Raport: p50/p95/p99 i maks. opóźnienia `POST`, rozkład kodów odpowiedzi,
-próbkowana co sekundę głębokość kolejki (`pending`/`retrying`/`processing`)
-oraz czas do opróżnienia kolejki; na końcu weryfikacja, że wszystkie
-wysłane klucze są `completed`. Wyniki z jednego przebiegu (z opisem
-sprzętu) trafiają do README.
+Oczekiwana przepustowość przetwarzania 1 workera: 64 sloty / 3,5 s ≈
+18/s ≈ 1100/min.
+
+**Scenariusz `steady`** [ustalone]: 1000/min przez 3 min.
+Kryteria: p99 opóźnienia `POST` < 100 ms, zero odpowiedzi innych niż 2xx.
+
+**Scenariusz `burst`** [ustalone]:
+
+| Faza | Ruch | Koniec fazy | Oczekiwane | Limit (porażka po przekroczeniu) |
+|---|---|---|---|---|
+| 1 | 3000/min (6000 żądań) | po 2 min | kolejka rośnie do ~3800; p99 `POST` < 100 ms, zero nie-2xx | stałe 2 min |
+| 2 | 100/min | kolejka (`pending`+`retrying`) ≤ ~100 | ~3,5–4 min | 10 min |
+| 3 | 0 | kolejka = 0 (łącznie z `processing`) | kilka sekund | 2 min |
+| całość | | | ~6 min | 15 min (twardy) |
+
+Na końcu każdego scenariusza: weryfikacja, że **wszystkie wysłane klucze
+mają status `completed`**.
+
+Raport: p50/p95/p99 i maks. opóźnienia `POST` per faza, rozkład kodów
+odpowiedzi, przebieg głębokości kolejki w czasie, czasy trwania faz,
+wynik kryteriów (PASS/FAIL). Wyniki z przebiegu (z opisem sprzętu) trafiają
+do README; dodatkowo przebieg `burst` z `--scale worker=2` pokazujący
+~dwukrotnie szybsze schodzenie kolejki [decyzja projektanta].
 
 ## 14. Testy
 
@@ -419,7 +480,9 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 
 - Kod (pakiet Pythona, `pyproject.toml`, ruff do formatowania/lintu).
 - `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`).
-- `docker-compose.yml`: `api`, `worker`, `jaeger`; wolumen z plikiem bazy.
+- `docker-compose.yml`: `api`, `worker`, `jaeger`; nazwany wolumen z plikiem
+  bazy; healthcheck API na `/ready`; `stop_grace_period: 20s` dla workera.
+- Zmiana devcontainera: feature `docker-in-docker`.
 - README: architektura, gwarancje (§4), tradeoffy, uruchomienie (lokalnie i
   w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego,
   założenia skalowalności, sekcja **TODO**.
