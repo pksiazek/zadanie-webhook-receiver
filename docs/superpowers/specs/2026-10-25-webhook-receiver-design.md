@@ -336,9 +336,11 @@ Duplikat w dowolnym stanie dostaje aktualny status.
 
 ## 9. Worker
 
-- Pętla asyncio z pulą `WORKER_CONCURRENCY` slotów (domyślnie 64 —
-  przy 17 zdarzeniach/s × średnio 3,5 s ≈ 60 równoległych) [decyzja
-  projektanta].
+- Pętla asyncio z pulą `WORKER_CONCURRENCY` równoległych slotów (nie
+  wątków — przetwarzanie to `sleep`, więc wystarcza asyncio); domyślnie
+  20. Domyślna konfiguracja compose: **3 workery × 20 slotów** = 60
+  slotów, co przy 17 zdarzeniach/s × średnio 3,5 s ≈ 60 pokrywa docelowy
+  ruch i od razu demonstruje skalowanie poziome [ustalone].
 - Pobiera pracę porcjami (tyle, ile wolnych slotów); gdy brak pracy — śpi
   `POLL_INTERVAL` (0,5 s); gdy pracy jest dużo — dobiera od razu.
 - Operacje SQLite wykonywane poza pętlą zdarzeń (`asyncio.to_thread` lub
@@ -465,33 +467,49 @@ otwartym (stałe tempo napływu, niezależne od czasu odpowiedzi), 5 wartości
 więc rate limiting nie fałszuje wyniku). Głębokość kolejki próbkowana co
 1 s z `/metrics` API. Wszystkie tempa, czasy i progi to flagi skryptu.
 
-Środowisko: `docker compose` (api + 1 worker + Jaeger) w devcontainerze z
-docker-in-docker; podczas pomiaru ślady eksportowane do Jaegera (OTLP), nie
-do konsoli, bo wypisywanie spanów na stdout zawyża p99 [ustalone].
+Środowisko: `docker compose` (api + **3 workery × 20 slotów** + Jaeger) w
+devcontainerze z docker-in-docker [ustalone]; podczas pomiaru ślady
+eksportowane do Jaegera (OTLP), nie do konsoli, bo wypisywanie spanów na
+stdout zawyża p99 [ustalone].
 
-Oczekiwana przepustowość przetwarzania 1 workera: 64 sloty / 3,5 s ≈
-18/s ≈ 1100/min.
+Oczekiwana przepustowość przetwarzania: 1 worker × 20 slotów / 3,5 s ≈
+5,7/s ≈ 340/min; 3 workery ≈ 17/s ≈ 1030/min.
 
 **Scenariusz `steady`** [ustalone]: 1000/min przez 3 min.
 Kryteria: p99 opóźnienia `POST` < 100 ms, zero odpowiedzi innych niż 2xx.
+Uwaga: przy 3×20 przetwarzanie ma tylko ~3% zapasu nad 1000/min, więc
+kolejka może się lekko wahać — kryteria dotyczą przyjmowania.
 
 **Scenariusz `burst`** [ustalone]:
 
 | Faza | Ruch | Koniec fazy | Oczekiwane | Limit (porażka po przekroczeniu) |
 |---|---|---|---|---|
-| 1 | 3000/min (6000 żądań) | po 2 min | kolejka rośnie do ~3800; p99 `POST` < 100 ms, zero nie-2xx | stałe 2 min |
-| 2 | 100/min | kolejka (`pending`+`retrying`) ≤ ~100 | ~3,5–4 min | 10 min |
+| 1 | 3000/min (6000 żądań) | po 2 min | kolejka rośnie do ~3900; p99 `POST` < 100 ms, zero nie-2xx | stałe 2 min |
+| 2 | 100/min | kolejka (`pending`+`retrying`) ≤ ~100 | ~4 min | 10 min |
 | 3 | 0 | kolejka = 0 (łącznie z `processing`) | kilka sekund | 2 min |
 | całość | | | ~6 min | 15 min (twardy) |
 
-Na końcu każdego scenariusza: weryfikacja, że **wszystkie wysłane klucze
+**Scenariusz `scaling`** [ustalone] — dowód skalowalności poziomej (sam
+przebieg na 3×20 pokazuje tylko, że ta konfiguracja wystarcza):
+
+- dla N = 1, 2, 3 workerów (po 20 slotów), każdy przebieg na czystej bazie;
+- zalanie kolejki nadmiarem pracy (3000 zdarzeń wysłanych szybko, bez
+  dalszego napływu), następnie pomiar przez 2 min tempa kończenia zdarzeń
+  (spadek `pending`+`retrying`+`processing` na minutę), z pominięciem
+  krótkiej rozgrzewki;
+- oczekiwane ≈ 340 / 690 / 1030 zdarzeń/min;
+- kryterium: przepustowość dla N ≥ 85% wartości liniowej
+  (N × wynik dla 1 workera). Wynik poniżej oznacza, że wąskim gardłem
+  staje się SQLite (rywalizacja o zapis) — to także wartościowy wynik do
+  README, z analizą.
+
+Na końcu `steady` i `burst`: weryfikacja, że **wszystkie wysłane klucze
 mają status `completed`**.
 
 Raport: p50/p95/p99 i maks. opóźnienia `POST` per faza, rozkład kodów
 odpowiedzi, przebieg głębokości kolejki w czasie, czasy trwania faz,
-wynik kryteriów (PASS/FAIL). Wyniki z przebiegu (z opisem sprzętu) trafiają
-do README; dodatkowo przebieg `burst` z `--scale worker=2` pokazujący
-~dwukrotnie szybsze schodzenie kolejki [decyzja projektanta].
+tabela przepustowości dla N = 1, 2, 3, wynik kryteriów (PASS/FAIL). Wyniki
+(z opisem sprzętu) trafiają do README.
 
 ## 14. Testy
 
@@ -537,7 +555,9 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 ## 16. Założenia skalowalności (do README)
 
 - 1000/min ≈ 17/s; przy średnio 3,5 s przetwarzania potrzeba ~60
-  równoległych slotów → jeden worker z 64 slotami; więcej przez `--scale`.
+  równoległych slotów → domyślnie 3 workery × 20 slotów; więcej przez
+  `--scale worker=N`. Liniowość skalowania weryfikuje scenariusz
+  `scaling` (§13).
 - Zapis do SQLite w WAL: jeden pisarz naraz; przy ~17 INSERT/s +
   porównywalnej liczbie UPDATE workerów jest duży zapas — weryfikujemy
   pomiarem, łącznie z kosztem `synchronous=FULL`.

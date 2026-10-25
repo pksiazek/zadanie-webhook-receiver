@@ -288,3 +288,21 @@ odróżnienie bezczynnego workera od martwego przy pustej kolejce.
 **Decyzja: usunąć tabelę.** Awarię workera wykrywa healthcheck Dockera na
 jego `/health`, brak postępu — `webhook_queue_oldest_pending_age_seconds`;
 ograniczenie opisane w README.
+
+## 14. Test obciążeniowy — skalowalność
+
+Propozycja użytkownika: przeprojektować test tak, by były **3 workery po 20
+„wątków”** — test ma udowadniać skalowalność.
+
+Doprecyzowanie: worker używa równoległych slotów asyncio, nie wątków
+(przetwarzanie to `sleep`); efekt dla testu ten sam. Wyliczenie: 3×20 =
+60 slotów ≈ 1030/min (prawie jak dotychczasowe 1×64); `steady` ma ~3%
+zapasu, `burst` — kolejka ~3900, spadek ~4 min, w limitach.
+
+Uwaga: sam przebieg na 3×20 pokazuje, że konfiguracja wystarcza, a nie że
+system się skaluje. Zaproponowano scenariusz `scaling`: N = 1, 2, 3 workery
+po 20 slotów, zalana kolejka, pomiar tempa kończenia przez 2 min;
+oczekiwane ≈ 340/690/1030 na min; kryterium ≥ 85% liniowości.
+
+**Decyzja: domyślna konfiguracja compose i scenariusze `steady`/`burst`
+na 3×20; scenariusz `scaling` zaakceptowany.**
