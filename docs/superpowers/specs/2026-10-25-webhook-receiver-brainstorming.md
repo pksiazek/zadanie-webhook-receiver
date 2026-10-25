@@ -393,3 +393,22 @@ stan weryfikacji: pomiar recenzenta w jednym kontenerze, wariant
 wielokontenerowy potwierdzą scenariusz `scaling` i benchmark nr 3.
 
 **Decyzja: dopisane do §15 jako obowiązkowy punkt README [ustalone].**
+
+## 21. Poprawki redakcyjne i przenośność
+
+Uwagi użytkownika i zmiany:
+
+- Cel 2 mówił o „tym samym payloadzie” — poprawione: duplikat = ten sam
+  klucz, bez porównywania treści.
+- Anty-cel o przyjmowaniu przeformułowany: przyjmowanie nie może zależeć
+  od tempa przetwarzania.
+- `X-Source`: dopisane, że wymóg wynika z rate limitingu; przy okazji
+  usunięta sprzeczność („wszystkie endpointy” vs `GET` bez nagłówka).
+- Retencja payloadu: głównym celem jest GDPR; plik bazy nie maleje
+  (retencja tylko ogranicza wzrost); `auto_vacuum=INCREMENTAL` jako opcja
+  w TODO.
+- Pytanie o przenośność Dockera poza devcontainerem — dopisane wymaganie:
+  działanie na dowolnym hoście z Docker Engine + Compose v2, obraz
+  wieloarchitekturowy, test obciążeniowy i benchmarki jako kontener
+  (profil `loadtest`), instrukcja w README, `docker build` w CI.
+- Wersje SQLite/Pythona — w toku (patrz następna sekcja).

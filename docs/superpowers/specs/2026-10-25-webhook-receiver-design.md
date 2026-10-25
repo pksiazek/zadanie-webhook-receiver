@@ -32,8 +32,8 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 
 1. Każdy webhook, który dostał odpowiedź `202`, zostanie przetworzony —
    także po restarcie lub awarii procesu.
-2. Duplikat (ten sam klucz, ten sam payload) nie jest przetwarzany ponownie;
-   dostaje aktualny status.
+2. Duplikat (ten sam `idempotency_key`, bez porównywania treści) nie jest
+   przetwarzany ponownie; dostaje aktualny status.
 3. Klient może w każdej chwili sprawdzić status zdarzenia.
 4. Poprawne działanie przy wielu równoczesnych webhookach; przyjmowanie
    wytrzymuje ~1000 webhooków/min z niskim opóźnieniem.
@@ -54,7 +54,8 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 
 - Zgubienie zdarzenia, któremu odpowiedziano `202`.
 - Ponowne przetworzenie duplikatu w normalnym trybie pracy.
-- Przyjmowanie, które zwalnia lub pada, bo przetwarzanie nie nadąża.
+- Uzależnienie przyjmowania od tempa przetwarzania — rosnąca kolejka nie
+  może wydłużać odpowiedzi na `POST` ani powodować przy nim błędów.
 - Obietnica „exactly once” w README bez wyjaśnienia, co naprawdę jest
   gwarantowane.
 
@@ -129,8 +130,11 @@ osobne procesy.
 
 ## 6. API HTTP
 
-Wszystkie endpointy webhooków wymagają nagłówka `X-Source` (identyfikator
-systemu nadawcy) [ustalone]. Brak → `400`.
+`POST /webhooks` wymaga nagłówka `X-Source` (identyfikator systemu
+nadawcy) [ustalone]. **Powodem jest rate limiting** — limit liczony jest
+per nadawca, więc nadawcę trzeba znać; dodatkowo `X-Source` służy jako
+etykieta w metrykach, logach i śladach. Brak → `400`. `GET` statusu
+nagłówka nie wymaga.
 
 ### `POST /webhooks`
 
@@ -397,11 +401,20 @@ propozycja]:
 
 | Dane | Domyślnie | Co się dzieje |
 |---|---|---|
-| `payload_json` i `result_json` zdarzeń `completed` | 7 dni od `finished_at` | ustawiane na `NULL` |
+| `payload_json` i `result_json` zdarzeń `completed` | 7 dni od `finished_at` | ustawiane na `NULL` (cel: GDPR — patrz niżej) |
 | cały wiersz `completed` (klucz + status) | 30 dni od `finished_at` | wiersz usuwany |
 | cały wiersz `failed` (z payloadem — do diagnozy) | 30 dni od `finished_at` | wiersz usuwany |
 
 Zdarzenia niezakończone nigdy nie są usuwane.
+
+**Czyszczenie payloadu służy przede wszystkim GDPR** (minimalizacja
+przechowywania danych osobowych — w przykładach e-mail, imię i nazwisko),
+nie odzyskiwaniu miejsca. Plik bazy **nie maleje**: SQLite oznacza zwolnione
+strony jako wolne i używa ich ponownie dla nowych danych, więc retencja
+**ogranicza wzrost** pliku, ale go nie zmniejsza [ustalone — do README].
+Zwracanie miejsca systemowi (`PRAGMA auto_vacuum=INCREMENTAL` +
+okresowe `incremental_vacuum`) → TODO jako opcja; `VACUUM` blokuje bazę na
+cały czas przebudowy, więc nie nadaje się do pracy w tle.
 
 Konsekwencje (opisane w README): okno retencji klucza = okno ochrony przed
 duplikatami. Duplikat po wyczyszczeniu payloadu nadal jest rozpoznawany
@@ -585,6 +598,16 @@ Narzędzie: pytest. Kluczowe obszary:
   bazy; healthcheck API na `/ready`; healthcheck workera na jego `/health`
   (port 9100 w sieci compose); `stop_grace_period: 20s` dla workera.
 - Zmiana devcontainera: feature `docker-in-docker`.
+- **Przenośność Dockera** [ustalone]: `Dockerfile` i `docker-compose.yml`
+  nie mogą zależeć od devcontainera — mają działać na dowolnym hoście z
+  Docker Engine i Compose v2 (Linux, macOS z Docker Desktop/OrbStack,
+  Windows z WSL2). W praktyce: oficjalny wieloarchitekturowy obraz bazowy
+  (amd64 i arm64), brak ścieżek i bind mountów specyficznych dla
+  devcontainera, baza na nazwanym wolumenie, porty konfigurowalne
+  zmiennymi. Test obciążeniowy i benchmarki uruchamialne także jako
+  kontener (profil compose `loadtest`), żeby nie wymagały Pythona na
+  hoście. README zawiera instrukcję dla „gołego” hosta z Dockerem;
+  `docker build` w CI weryfikuje budowanie poza devcontainerem.
 - README: architektura, gwarancje (§4), tradeoffy, uruchomienie (lokalnie i
   w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego i benchmarków,
   założenia skalowalności, sekcja **TODO**. Sekcja tradeoffów musi jawnie
@@ -692,7 +715,8 @@ widoczny jako badge w README [decyzja projektanta].
 - Treść sekcji TODO w README (minimum: HMAC, współdzielony rate limit,
   pełny stos obserwowalności, PostgreSQL/broker, narzędzie migracji,
   endpoint do ręcznego ponowienia `failed`, dead-letter/alerty,
-  wykrywanie niezgodności treści przy ponowieniu z tym samym kluczem).
+  wykrywanie niezgodności treści przy ponowieniu z tym samym kluczem,
+  `auto_vacuum=INCREMENTAL` jako opcja odzyskiwania miejsca — §11).
   Obowiązkowo także punkt [ustalone]: **doprecyzować z nadawcami format
   `idempotency_key`** (zestaw znaków, długość, struktura) i na tej podstawie
   dobrać najlepsze rozwiązanie — obecne (dowolny string + kodowanie
