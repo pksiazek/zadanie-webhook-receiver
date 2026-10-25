@@ -5,26 +5,26 @@ import pytest
 
 from webhook_receiver.common.db import (
     ConnectionPool,
+    _enable_wal,
     check_sqlite_version,
+    connect,
     immediate,
     init_schema,
-)
-from webhook_receiver.common.db import (
-    connect as _connect,
 )
 from webhook_receiver.common.models import Event, Status
 
 
-@pytest.fixture(autouse=True)
-def connect(monkeypatch):
+@pytest.fixture
+def open_db():
+    """Open connections via connect() and close them after the test."""
     opened = []
 
-    def tracked(path):
-        conn = _connect(path)
+    def opener(path, **kwargs):
+        conn = connect(path, **kwargs)
         opened.append(conn)
         return conn
 
-    yield tracked
+    yield opener
     for conn in opened:
         conn.close()
 
@@ -43,22 +43,23 @@ def test_check_sqlite_version_rejects_old():
     check_sqlite_version("3.46.1")
 
 
-def test_connect_sets_pragmas(tmp_path, connect):
-    conn = connect(tmp_path / "a.db")
+def test_connect_sets_pragmas(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
     assert conn.row_factory is sqlite3.Row
     assert not conn.in_transaction
+    assert conn.autocommit is True
 
 
-def test_connect_creates_parent_dir(tmp_path, connect):
-    connect(tmp_path / "nested" / "dir" / "a.db")
+def test_connect_creates_parent_dir(tmp_path, open_db):
+    open_db(tmp_path / "nested" / "dir" / "a.db")
     assert (tmp_path / "nested" / "dir" / "a.db").exists()
 
 
-def test_immediate_commits(tmp_path, connect):
-    conn = connect(tmp_path / "a.db")
+def test_immediate_commits(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
     init_schema(conn)
     with immediate(conn) as c:
         _insert(c)
@@ -68,8 +69,8 @@ def test_immediate_commits(tmp_path, connect):
     )
 
 
-def test_immediate_rolls_back_on_error(tmp_path, connect):
-    conn = connect(tmp_path / "a.db")
+def test_immediate_rolls_back_on_error(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
     init_schema(conn)
     with pytest.raises(ValueError, match="boom"):
         with immediate(conn) as c:
@@ -81,15 +82,15 @@ def test_immediate_rolls_back_on_error(tmp_path, connect):
     )
 
 
-def test_schema_is_strict(tmp_path, connect):
-    conn = connect(tmp_path / "a.db")
+def test_schema_is_strict(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
     init_schema(conn)
     with pytest.raises((sqlite3.IntegrityError, sqlite3.DataError)):
         _insert(conn, run_at="soon")
 
 
-def test_schema_checks_status(tmp_path, connect):
-    conn = connect(tmp_path / "a.db")
+def test_schema_checks_status(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
     init_schema(conn)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -99,8 +100,8 @@ def test_schema_checks_status(tmp_path, connect):
         )
 
 
-def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, connect):
-    conn = connect(tmp_path / "a.db")
+def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
     init_schema(conn)
     init_schema(conn)
     names = {
@@ -112,9 +113,21 @@ def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, connect):
     assert {"ix_events_ready", "ix_events_leased", "ix_events_finished"} <= (
         names
     )
+    sql = {
+        r["name"]: " ".join(r["sql"].split())
+        for r in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index'"
+            " AND name LIKE 'ix_events_%'"
+        )
+    }
+    assert sql["ix_events_ready"].endswith(
+        "WHERE status IN ('pending', 'retrying')"
+    )
+    assert sql["ix_events_leased"].endswith("WHERE status = 'processing'")
+    assert sql["ix_events_finished"].endswith("WHERE finished_at IS NOT NULL")
 
 
-def test_init_schema_concurrent(tmp_path, connect):
+def test_init_schema_concurrent(tmp_path, open_db):
     path = tmp_path / "a.db"
     barrier = threading.Barrier(4)
     errors = []
@@ -134,7 +147,7 @@ def test_init_schema_concurrent(tmp_path, connect):
     for t in threads:
         t.join()
     assert errors == []
-    conn = connect(path)
+    conn = open_db(path)
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE name = 'webhook_events'"
     ).fetchone()
@@ -163,3 +176,82 @@ def test_event_payload_purged():
     assert Event(payload=None, finished_at=2, **kwargs).payload_purged
     assert not Event(payload={}, finished_at=2, **kwargs).payload_purged
     assert not Event(payload=None, finished_at=None, **kwargs).payload_purged
+
+
+class _WalConn:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def execute(self, sql):
+        self.calls += 1
+        return self
+
+    def fetchone(self):
+        return (self.results.pop(0),)
+
+
+def test_enable_wal_retries_until_wal():
+    conn = _WalConn(["delete", "delete", "wal"])
+    sleeps = []
+    _enable_wal(conn, sleeps.append)
+    assert conn.calls == 3
+    assert len(sleeps) == 2
+
+
+def test_enable_wal_raises_after_last_attempt():
+    conn = _WalConn(["delete"] * 5)
+    sleeps = []
+    with pytest.raises(RuntimeError, match="could not enable WAL"):
+        _enable_wal(conn, sleeps.append)
+    assert conn.calls == 5
+
+
+def test_plain_connect_is_thread_bound(tmp_path, open_db):
+    conn = open_db(tmp_path / "a.db")
+    errors = []
+
+    def use():
+        try:
+            conn.execute("SELECT 1")
+        except sqlite3.ProgrammingError as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=use)
+    t.start()
+    t.join()
+    assert len(errors) == 1
+
+
+class _FailingCommitConn:
+    def __init__(self):
+        self.in_transaction = False
+        self.statements = []
+
+    def execute(self, sql):
+        self.statements.append(sql)
+        if sql == "BEGIN IMMEDIATE":
+            self.in_transaction = True
+        elif sql == "COMMIT":
+            raise sqlite3.OperationalError("disk I/O error")
+        elif sql == "ROLLBACK":
+            self.in_transaction = False
+
+
+def test_immediate_rolls_back_when_commit_fails():
+    conn = _FailingCommitConn()
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        with immediate(conn):
+            pass
+    assert not conn.in_transaction
+    assert conn.statements[-1] == "ROLLBACK"
+
+
+def test_immediate_takes_write_lock_up_front(tmp_path, open_db):
+    first = open_db(tmp_path / "a.db")
+    init_schema(first)
+    second = open_db(tmp_path / "a.db")
+    second.execute("PRAGMA busy_timeout=50")
+    with immediate(first):
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            second.execute("BEGIN IMMEDIATE")

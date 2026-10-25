@@ -1,6 +1,7 @@
 import sqlite3
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -43,15 +44,35 @@ def check_sqlite_version(version: str = sqlite3.sqlite_version) -> None:
         raise RuntimeError(f"SQLite >= {required} required, found {version}")
 
 
-def connect(path: Path | str) -> sqlite3.Connection:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, autocommit=True, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA synchronous=FULL")
-    for _ in range(_WAL_ATTEMPTS):
+def _enable_wal(
+    conn: sqlite3.Connection,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    for attempt in range(1, _WAL_ATTEMPTS + 1):
         if conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal":
-            break
+            return
+        if attempt < _WAL_ATTEMPTS:
+            sleep(0.05 * attempt)
+    raise RuntimeError(
+        f"could not enable WAL journal mode after {_WAL_ATTEMPTS} attempts"
+    )
+
+
+def connect(
+    path: Path | str, *, check_same_thread: bool = True
+) -> sqlite3.Connection:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(
+        path, autocommit=True, check_same_thread=check_same_thread
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=FULL")
+        _enable_wal(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -60,11 +81,14 @@ def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    else:
         conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass  # keep the original exception
+        raise
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -86,7 +110,10 @@ class ConnectionPool:
     def get(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = connect(self._path)
+            # Safe: the connection is handed out only to the thread that
+            # created it (threading.local); the single cross-thread access
+            # is close_all() at shutdown.
+            conn = connect(self._path, check_same_thread=False)
             self._local.conn = conn
             with self._lock:
                 self._all.append(conn)
