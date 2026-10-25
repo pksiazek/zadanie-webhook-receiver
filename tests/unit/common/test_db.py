@@ -6,11 +6,27 @@ import pytest
 from webhook_receiver.common.db import (
     ConnectionPool,
     check_sqlite_version,
-    connect,
     immediate,
     init_schema,
 )
+from webhook_receiver.common.db import (
+    connect as _connect,
+)
 from webhook_receiver.common.models import Event, Status
+
+
+@pytest.fixture(autouse=True)
+def connect(monkeypatch):
+    opened = []
+
+    def tracked(path):
+        conn = _connect(path)
+        opened.append(conn)
+        return conn
+
+    yield tracked
+    for conn in opened:
+        conn.close()
 
 
 def _insert(conn, key="k", run_at=1):
@@ -27,7 +43,7 @@ def test_check_sqlite_version_rejects_old():
     check_sqlite_version("3.46.1")
 
 
-def test_connect_sets_pragmas(tmp_path):
+def test_connect_sets_pragmas(tmp_path, connect):
     conn = connect(tmp_path / "a.db")
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
@@ -36,12 +52,12 @@ def test_connect_sets_pragmas(tmp_path):
     assert not conn.in_transaction
 
 
-def test_connect_creates_parent_dir(tmp_path):
+def test_connect_creates_parent_dir(tmp_path, connect):
     connect(tmp_path / "nested" / "dir" / "a.db")
     assert (tmp_path / "nested" / "dir" / "a.db").exists()
 
 
-def test_immediate_commits(tmp_path):
+def test_immediate_commits(tmp_path, connect):
     conn = connect(tmp_path / "a.db")
     init_schema(conn)
     with immediate(conn) as c:
@@ -52,7 +68,7 @@ def test_immediate_commits(tmp_path):
     )
 
 
-def test_immediate_rolls_back_on_error(tmp_path):
+def test_immediate_rolls_back_on_error(tmp_path, connect):
     conn = connect(tmp_path / "a.db")
     init_schema(conn)
     with pytest.raises(ValueError, match="boom"):
@@ -65,14 +81,14 @@ def test_immediate_rolls_back_on_error(tmp_path):
     )
 
 
-def test_schema_is_strict(tmp_path):
+def test_schema_is_strict(tmp_path, connect):
     conn = connect(tmp_path / "a.db")
     init_schema(conn)
     with pytest.raises((sqlite3.IntegrityError, sqlite3.DataError)):
         _insert(conn, run_at="soon")
 
 
-def test_schema_checks_status(tmp_path):
+def test_schema_checks_status(tmp_path, connect):
     conn = connect(tmp_path / "a.db")
     init_schema(conn)
     with pytest.raises(sqlite3.IntegrityError):
@@ -83,7 +99,7 @@ def test_schema_checks_status(tmp_path):
         )
 
 
-def test_init_schema_creates_indexes_and_is_idempotent(tmp_path):
+def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, connect):
     conn = connect(tmp_path / "a.db")
     init_schema(conn)
     init_schema(conn)
@@ -98,7 +114,7 @@ def test_init_schema_creates_indexes_and_is_idempotent(tmp_path):
     )
 
 
-def test_init_schema_concurrent(tmp_path):
+def test_init_schema_concurrent(tmp_path, connect):
     path = tmp_path / "a.db"
     barrier = threading.Barrier(4)
     errors = []
