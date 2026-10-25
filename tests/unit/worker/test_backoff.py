@@ -1,5 +1,7 @@
 from random import Random
 
+import pytest
+
 from webhook_receiver.worker.backoff import backoff_ms
 
 
@@ -33,3 +35,14 @@ def test_backoff_is_deterministic_for_seeded_rng():
 def test_backoff_jitter_matches_formula():
     expected = round(4000 * Random(7).uniform(0.8, 1.2))
     assert backoff_ms(2, 2000, 60_000, Random(7)) == expected
+
+
+@pytest.mark.parametrize("attempt", [0, -1])
+def test_backoff_rejects_attempt_below_one(attempt):
+    with pytest.raises(ValueError, match="attempt"):
+        backoff_ms(attempt, 2000, 60_000, Random(0))
+
+
+def test_backoff_huge_attempt_is_capped():
+    value = backoff_ms(10_000, 2000, 60_000, Random(0))
+    assert 48_000 <= value <= 72_000

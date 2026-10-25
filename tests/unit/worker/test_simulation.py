@@ -65,5 +65,13 @@ async def test_simulate_sleep_duration_comes_from_rng():
     assert sleep.calls == [Random(3).uniform(2, 5)]
 
 
+@pytest.mark.parametrize("trigger", [1, None, ["fail_always"]])
+async def test_simulate_ignores_non_string_trigger(trigger):
+    result = await simulate(
+        {"simulate": trigger}, 1, 2, 5, Random(0), FakeSleep()
+    )
+    assert "duration_ms" in result
+
+
 def test_simulated_failure_is_exception():
     assert issubclass(SimulatedFailure, Exception)
