@@ -21,6 +21,42 @@ Jaeger, GitHub Actions.
 (zaakceptowany). Sekcje spec cytowane jako §N. Przebieg decyzji:
 [brainstorming](../specs/2026-10-25-webhook-receiver-brainstorming.md).
 
+## Sposób wykonania
+
+[ustalone z użytkownikiem] Zadania **po kolei**, wykonywane przez
+subagentów koordynowanych z sesji głównej
+(`superpowers:subagent-driven-development`), **każde zadanie jako osobny
+PR**:
+
+1. Koordynator tworzy gałąź `task/NN-krotka-nazwa` od aktualnego `main`
+   (np. `task/03-repository-intake`).
+2. Świeży subagent-implementer dostaje zadanie z planu, ścieżkę do spec i
+   nazwę gałęzi; pracuje w TDD, robi commity na gałęzi i kończy na
+   zielonych `ruff check .`, `ruff format --check .` i `pytest`.
+3. Push gałęzi i `gh pr create` z tytułem `Task NN: <tytuł zadania>`. Opis
+   PR: cel, lista plików, link do sekcji planu i spec, wynik testów
+   lokalnych; ostatnia linia
+   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+4. Zielone CI: `gh pr checks --watch`.
+5. Świeży subagent-recenzent czyta diff PR, zadanie z planu i spec; uwagi
+   wracają do implementera (kolejne commity na tej samej gałęzi) aż do
+   akceptacji. Podsumowanie recenzji jako komentarz w PR (`gh pr comment`).
+6. Merge po zielonym CI i akceptacji recenzenta: `gh pr merge --squash
+   --delete-branch` — jeden commit na zadanie w `main`, z tytułem PR i
+   linią `Co-Authored-By`. Merge wykonuje koordynator; użytkownik może w
+   każdej chwili przejrzeć otwarty PR i wstrzymać merge.
+7. `git checkout main && git pull`, następne zadanie.
+
+Wyjątki: **Task 0** — po merge STOP na przebudowę devcontainera przez
+użytkownika i weryfikację środowiska przed Task 1. **Task 13–15** —
+pomiary uruchamiane na gałęzi zadania, `results/` są częścią PR.
+**Task 17** — decyzja „realizujemy / TODO” przed utworzeniem gałęzi.
+**Na koniec** — recenzja całego `main` przez świeżego recenzenta
+(`superpowers:requesting-code-review`); poprawki jako osobny PR.
+
+Komunikaty commitów podane w krokach „PR” poniżej są tytułami commitów na
+gałęzi; tytuł PR ma postać `Task NN: <tytuł zadania>`.
+
 ## Global Constraints
 
 - Python **3.14**; obraz Docker `python:3.14-slim`; devcontainer
@@ -48,8 +84,13 @@ Jaeger, GitHub Actions.
   i `pytest` — to warunek ukończenia zadania.
 - Język: identyfikatory, komentarze i komunikaty w kodzie po angielsku;
   README po polsku [decyzja planu].
+- Każde zadanie = gałąź `task/NN-…` + PR + zielone CI + akceptacja
+  recenzenta + squash merge (sekcja „Sposób wykonania”); nic nie trafia
+  prosto do `main`.
 - Commity kończą się linią
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; opis PR
+  kończy się linią
+  `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 - Payload nigdy nie trafia do atrybutów spanów ani logów.
 
 ## Review Focus
@@ -130,17 +171,14 @@ test architektury (Task 11). Wykonanie zadań **po kolei** [ustalone].
 Ustaw `"python.defaultInterpreterPath": "/usr/local/bin/python"` bez zmian.
 Dodaj `16686` do `forwardPorts` (UI Jaegera).
 
-- [ ] **Step 2: Commit i push**
-
-```bash
-git add .devcontainer/devcontainer.json
-git commit -m "chore: devcontainer on Python 3.14 trixie with docker-in-docker"
-git push
-```
+- [ ] **Step 2: Commit na gałęzi `task/00-devcontainer` i PR**
+  (`chore: devcontainer on Python 3.14 trixie with docker-in-docker`);
+  merge wg „Sposobu wykonania”. CI jeszcze nie istnieje — warunkiem merge
+  jest akceptacja recenzenta.
 
 - [ ] **Step 3: STOP — przebudowa przez użytkownika**
 
-Poproś użytkownika o „Rebuild Container” w VS Code. Po przebudowie
+Po merge poproś użytkownika o „Rebuild Container” w VS Code. Po przebudowie
 zweryfikuj:
 
 Run: `python --version && python -c "import sqlite3;print(sqlite3.sqlite_version)" && docker info --format '{{.ServerVersion}}' && docker compose version`
@@ -230,7 +268,8 @@ Expected: FAIL (`ImportError: Settings`).
 
 - [ ] **Step 6: `.github/workflows/ci.yml`**
 
-Trigger `push` i `pull_request`; job `test` na `ubuntu-latest`,
+Trigger `push` tylko dla gałęzi `main` oraz `pull_request` (bez podwójnych
+uruchomień dla PR); job `test` na `ubuntu-latest`,
 `actions/setup-python` z `python-version: "3.14"`; kroki:
 `pip install -e ".[dev,loadtest]"`, `ruff check .`, `ruff format --check .`,
 `pytest`. (Krok `docker build` dochodzi w Task 13.) Próg 85% obowiązuje
@@ -238,12 +277,12 @@ od pierwszego commita — każde zadanie dodaje kod razem z testami, więc
 pokrycie nie powinno spaść poniżej progu; jeśli spadnie, zadanie nie jest
 ukończone.
 
-- [ ] **Step 7: Lint + commit + push**
+- [ ] **Step 7: Lint, commit i PR**
 
 Run: `ruff check . && ruff format --check . && pytest`
-```bash
-git add -A && git commit -m "feat: project skeleton, settings, clock, CI" && git push
-```
+Commit na gałęzi `task/01-skeleton` (`feat: project skeleton, settings,
+clock, CI`), PR wg „Sposobu wykonania”; ten PR jest pierwszym, na którym
+uruchamia się CI.
 
 ---
 
@@ -329,7 +368,7 @@ def test_pool_returns_connection_per_thread(tmp_path):
 
 - [ ] **Step 4: Uruchom — PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: sqlite connection, transactions, schema`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: sqlite connection, transactions, schema`)
 
 ---
 
@@ -385,7 +424,7 @@ Fixture `repo` (w `tests/conftest.py`): `FakeClock`, `ConnectionPool(tmp_path
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: event intake and lookup`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: event intake and lookup`)
 
 ---
 
@@ -448,7 +487,7 @@ test).
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: claim, lease recovery and fenced completion`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: claim, lease recovery and fenced completion`)
 
 ---
 
@@ -496,7 +535,7 @@ def test_stats_and_purge_queries_use_indexes(repo)   # bez "SCAN webhook_events"
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: queue stats and two-tier retention`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: queue stats and two-tier retention`)
 
 ---
 
@@ -546,7 +585,7 @@ async def test_simulate_success_without_trigger(): ...
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: backoff and processing simulation`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: backoff and processing simulation`)
 
 ---
 
@@ -586,7 +625,7 @@ def test_lru_bounds_memory(clock):
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: per-source token bucket rate limiter`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: per-source token bucket rate limiter`)
 
 ---
 
@@ -670,7 +709,7 @@ instrumentów (nie asercje), aby `/metrics` dawał nazwy z §12.
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: OpenTelemetry tracing, metrics and JSON logs`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: OpenTelemetry tracing, metrics and JSON logs`)
 
 ---
 
@@ -708,7 +747,7 @@ def test_body_limit_allows_small_body()
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: queue stats cache and body size limit`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: queue stats cache and body size limit`)
 
 ---
 
@@ -805,7 +844,7 @@ def test_post_stores_traceparent_of_request_span(client, span_exporter)
   20 równoległych `POST` z tym samym kluczem przez `TestClient` →
   dokładnie jeden `202`, reszta `200`. Uruchom, PASS.
 
-- [ ] **Step 6: Lint + commit** (`feat: HTTP API with ordered checks and backpressure`)
+- [ ] **Step 6: Lint, commit i PR** (`feat: HTTP API with ordered checks and backpressure`)
 
 ---
 
@@ -911,7 +950,7 @@ def test_api_and_worker_do_not_import_each_other():
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
 
-- [ ] **Step 5: Lint + commit** (`feat: async worker with slot refill, fencing and retention`)
+- [ ] **Step 5: Lint, commit i PR** (`feat: async worker with slot refill, fencing and retention`)
 
 ---
 
@@ -949,7 +988,7 @@ def test_separate_worker_process_shares_database(tmp_path)
 Run: `pytest -v`
 Expected: PASS, pokrycie ≥ 85%.
 
-- [ ] **Step 3: Lint + commit** (`test: end-to-end and restart scenarios`)
+- [ ] **Step 3: Lint, commit i PR** (`test: end-to-end and restart scenarios`)
 
 ---
 
@@ -1007,10 +1046,10 @@ Run: `docker compose stop worker` → `docker compose ps` pokazuje workery
 W `ci.yml` dodaj job `docker` (`needs: test`): `docker build -t
 webhook-receiver .`.
 
-- [ ] **Step 5: Commit + push; sprawdź zielony workflow**
+- [ ] **Step 5: Commit i PR; sprawdź zielony workflow**
 
-Run: `gh run watch --exit-status`
-Expected: oba joby zielone.
+Run: `gh pr checks --watch`
+Expected: oba joby (`test`, `docker`) zielone.
 
 ---
 
@@ -1074,7 +1113,7 @@ Expected: wszystkie PASS. Zapisz raporty w `results/` (commitowane) —
 źródło liczb do README. Przy FAIL: nie zmieniaj progów; zdiagnozuj
 (`superpowers:systematic-debugging`) i opisz wynik.
 
-- [ ] **Step 6: Lint + commit** (`feat: load test scenarios and scaling orchestration`)
+- [ ] **Step 6: Lint, commit i PR** (`feat: load test scenarios and scaling orchestration`)
 
 ---
 
@@ -1114,7 +1153,7 @@ Run: `docker compose run --rm --entrypoint python loadtest -m benchmarks.sqlite_
 Expected: tabela 4 benchmarków; `claim` przy 100 000 nie rośnie
 proporcjonalnie do rozmiaru (indeks).
 
-- [ ] **Step 6: Lint + commit** (`feat: SQLite benchmarks`)
+- [ ] **Step 6: Lint, commit i PR** (`feat: SQLite benchmarks`)
 
 ---
 
@@ -1150,7 +1189,7 @@ proporcjonalnie do rozmiaru (indeks).
 Każde polecenie z README wykonane raz na czystym `docker compose down -v`;
 wyniki zgodne z opisem.
 
-- [ ] **Step 3: Commit + push** (`docs: README with architecture, tradeoffs and results`)
+- [ ] **Step 3: Commit i PR** (`docs: README with architecture, tradeoffs and results`)
 
 ---
 
@@ -1173,6 +1212,6 @@ Decyzja „realizujemy / TODO” zapada po Task 16 (spec §12). Jeśli TAK:
 - [ ] **Step 3:** Weryfikacja: `curl localhost:8889/metrics | grep -c
   webhook_worker_up` == 3 przy 3 workerach.
 - [ ] **Step 4:** README — sekcja „ile workerów działa” zaktualizowana.
-  Commit.
+  Commit i PR.
 
 Jeśli NIE: dopisz Collector do `# TODO` w README i zakończ.

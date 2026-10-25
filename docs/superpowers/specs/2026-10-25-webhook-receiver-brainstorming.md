@@ -492,3 +492,12 @@ lease → rezerwacja; ogrodzenie/fencing → kontrola numeru próby; token
 ogrodzenia → numer próby jako znacznik rezerwacji; ciało → body. Nazwy w
 kodzie bez zmian (`claim`, `CLAIM_SQL`). Zastosowane w dokumencie
 projektowym i planie; ten zapis zachowuje historyczne sformułowania.
+
+## 27. Sposób wykonania
+
+Pytanie użytkownika: jak realizowane będą zadania — w tej sesji? jako PR czy
+prosto do main? **Decyzje:** PR na każde zadanie (gałąź `task/NN-…`, zielone
+CI, akceptacja subagenta-recenzenta z komentarzem w PR, squash merge
+wykonywany przez koordynatora); wykonanie przez subagentów koordynowanych
+z tej sesji, po kolei. Ochrona gałęzi `main` w ustawieniach GitHuba nie jest
+włączana (można zaproponować osobno).
