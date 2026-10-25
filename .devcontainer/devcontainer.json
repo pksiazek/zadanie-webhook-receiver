@@ -1,9 +1,10 @@
 {
   "name": "webhook-receiver",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/python:3.14-trixie",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
     "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
   },
   "containerEnv": {
@@ -12,7 +13,7 @@
   "mounts": [
     "source=webhook-receiver-claude-config,target=/home/vscode/.claude,type=volume"
   ],
-  "forwardPorts": [8000],
+  "forwardPorts": [8000, 16686],
   "postCreateCommand": "bash .devcontainer/post-create.sh",
   "remoteUser": "vscode",
   "customizations": {
