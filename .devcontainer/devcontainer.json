@@ -13,7 +13,8 @@
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
   "mounts": [
-    "source=webhook-receiver-claude-config,target=/home/vscode/.claude,type=volume"
+    "source=webhook-receiver-claude-config,target=/home/vscode/.claude,type=volume",
+    "source=webhook-receiver-gh-config,target=/home/vscode/.config/gh,type=volume"
   ],
   "forwardPorts": [8000, 16686],
   "postCreateCommand": "bash .devcontainer/post-create.sh",

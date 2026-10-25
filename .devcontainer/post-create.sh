@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Named volumes are created root-owned; hand the Claude config dir to vscode.
-sudo chown -R vscode:vscode /home/vscode/.claude
+# Named volumes are created root-owned; hand the Claude and gh config dirs
+# to vscode.
+sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh
 
 # The base image ships a Yarn apt repo with an expired signing key, which
 # makes apt-get update fail. Yarn isn't needed here, so drop the source.
