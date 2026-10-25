@@ -608,7 +608,7 @@ więc rate limiting nie fałszuje wyniku). Głębokość kolejki próbkowana co
 Środowisko: `docker compose` (api + **3 workery × 20 slotów** + Jaeger) w
 devcontainerze z docker-in-docker [ustalone]; podczas pomiaru ślady
 eksportowane do Jaegera (OTLP), nie do konsoli, bo wypisywanie spanów na
-stdout zawyża p99 [ustalone].
+konsolę zawyża p99 [ustalone].
 
 Oczekiwana przepustowość przetwarzania: 1 worker × 20 slotów / 3,5 s ≈
 5,7/s ≈ 340/min; 3 workery ≈ 17/s ≈ 1030/min.
