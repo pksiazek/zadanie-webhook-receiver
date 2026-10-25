@@ -257,3 +257,34 @@ kodowanie procentowe; ograniczony zestaw znaków — ryzyko odrzucania
 legalnych webhooków; klucz poza ścieżką). **Decyzja: zostaje obecny
 wariant; w TODO punkt o doprecyzowaniu formatu `idempotency_key` i doborze
 najlepszego rozwiązania.**
+
+## 13. Przegląd schematu bazy
+
+Pytania użytkownika: (1) wady i zalety osobnych `id` i `idempotency_key`,
+(2) dlaczego wszystkie kolumny mają typ TEXT, (3) „wiele kolumn wydaje się
+niepotrzebnych — przyjrzyj się dokładnie”.
+
+Analiza (przedstawiona jako plan, zaakceptowana):
+
+1. **`id` zostaje** jako wewnętrzny uchwyt: w SQLite `INTEGER PRIMARY KEY`
+   to alias ukrytego `rowid` (bez dodatkowej kolumny i indeksu); indeks
+   `UNIQUE` na kluczu istniałby także przy kluczu jako PK; `WITHOUT ROWID`
+   odradzane dla dużych wierszy, a indeksy częściowe trzymałyby cały klucz.
+2. **Typy:** czasy → `INTEGER` (epoch ms), `payload_hash` → `BLOB`,
+   `status` zostaje TEXT + CHECK (czytelność), JSON zostaje TEXT, tabele
+   `STRICT`. DDL zweryfikowany w SQLite 3.40.1 (STRICT odrzuca tekst w
+   kolumnie liczbowej; zapytanie claimu używa indeksu częściowego).
+3. **Kolumny:** usunięte `max_attempts`, `updated_at`,
+   `payload_purged_at`, `lease_owner` (ogrodzenie numerem próby
+   `attempts`); `next_attempt_at` + `lease_expires_at` scalone w `run_at`
+   (wzorzec visibility timeout) — jeden indeks zamiast dwóch. 20 → 14
+   kolumn.
+
+Dodatkowe pytanie użytkownika: „przez co jest używana tabela
+`worker_heartbeats`?” — odpowiedź: zapisuje każdy worker co 5 s, czyta
+tylko API (`workers_alive` w `/ready`, metryka `webhook_workers_alive`);
+po rozdzieleniu readiness od workera tylko informacyjna; jedyna wartość —
+odróżnienie bezczynnego workera od martwego przy pustej kolejce.
+**Decyzja: usunąć tabelę.** Awarię workera wykrywa healthcheck Dockera na
+jego `/health`, brak postępu — `webhook_queue_oldest_pending_age_seconds`;
+ograniczenie opisane w README.

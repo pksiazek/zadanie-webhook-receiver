@@ -87,9 +87,10 @@ Gwarantujemy [ustalone — do opisania w README]:
   zapis i decyzja „nowe/duplikat/konflikt” w jednej transakcji.
 - **Wykonanie co najmniej raz:** jeśli worker padnie w trakcie, rezerwacja
   (lease) wygasa i zdarzenie jest podejmowane ponownie.
-- **Efekt dokładnie raz:** zapis wyniku jest warunkowy (tylko właściciel
-  aktualnej rezerwacji, tylko ze stanu `processing`), więc spóźniony worker
-  z wygasłą rezerwacją nie nadpisze wyniku. Prawdziwy efekt uboczny musiałby
+- **Efekt dokładnie raz:** zapis wyniku jest warunkowy — tylko ze stanu
+  `processing` i tylko dla aktualnego numeru próby (`attempts` działa jak
+  token ogrodzenia, patrz §8), więc spóźniony worker z wygasłą rezerwacją
+  nie nadpisze wyniku. Prawdziwy efekt uboczny musiałby
   być idempotentny względem klucza — to opisujemy jako założenie.
 
 ## 5. Wybrane podejście
@@ -122,7 +123,7 @@ osobne procesy.
                      │ /metrics /health /ready                    │   ▼
                                                      [ worker(s) (asyncio, N slotów) ]
                                                        │ symulacja, retry, lease,
-                                                       │ heartbeat, retencja
+                                                       │ retencja
                                                        │ /metrics /health (port pomocniczy)
            OpenTelemetry: traces + metrics ──► konsola (domyślnie) / OTLP ──► Jaeger
 ```
@@ -192,15 +193,16 @@ Nie wymaga `X-Source` (klucz jest globalny). Zwraca:
   "last_error": "simulated failure (fail_once)",
   "result": null,
   "created_at": "...",
-  "updated_at": "...",
   "finished_at": null,
   "payload_purged": false
 }
 ```
 
-`finished_at` odpowiada kolumnie o tej samej nazwie (moment wejścia w
-`completed` lub `failed`); `payload_purged` = `payload_purged_at IS NOT
-NULL`. Nieznany klucz → `404`.
+Mapowanie na schemat (§7): czasy w API w ISO 8601 UTC (w bazie INTEGER ms);
+`max_attempts` z konfiguracji; `next_attempt_at` = `run_at`, gdy status to
+`pending` lub `retrying` (inaczej `null`); `finished_at` = moment wejścia w
+`completed` lub `failed`; `payload_purged` = `finished_at IS NOT NULL AND
+payload_json IS NULL`. Nieznany klucz → `404`.
 
 ### Endpointy operacyjne
 
@@ -208,65 +210,82 @@ NULL`. Nieznany klucz → `404`.
 - `GET /ready` — readiness API: baza dostępna (zapytanie) i schemat
   zainicjalizowany; inaczej `503` z listą niespełnionych warunków.
   **Brak workera nie wpływa na gotowość API** — przyjmowanie ma działać
-  niezależnie od przetwarzania (to cel architektury B). Stan workerów jest
-  raportowany informacyjnie w ciele odpowiedzi (`workers_alive`, wiek
-  najświeższego heartbeatu) oraz metryką [ustalone — wymaga jawnego opisu
-  w README, patrz §15].
+  niezależnie od przetwarzania (to cel architektury B). API nie śledzi
+  żywotności workerów (brak tabeli heartbeatów — decyzja użytkownika):
+  awarię workera wykrywa healthcheck Dockera na jego `/health`, a brak
+  postępu przetwarzania — rosnący `webhook_queue_oldest_pending_age_seconds`
+  [ustalone — wymaga jawnego opisu w README, patrz §15].
 - `GET /metrics` — metryki w formacie Prometheus (eksporter OpenTelemetry),
   **w tym gauge'e kolejki** (`webhook_queue_depth{status}`,
-  `webhook_queue_oldest_pending_age_seconds`, `webhook_workers_alive`)
-  liczone z tego samego cache co backpressure. To jedno miejsce, z którego
+  `webhook_queue_oldest_pending_age_seconds`) liczone z tego samego cache
+  co backpressure. To jedno miejsce, z którego
   dyżurny i test obciążeniowy czytają stan kolejki, niezależnie od liczby
   workerów [decyzja projektanta, po recenzji].
 
 ## 7. Model danych (SQLite)
 
+Jedna tabela [ustalone po przeglądzie schematu z użytkownikiem]:
+
 ```sql
 CREATE TABLE webhook_events (
-    id               INTEGER PRIMARY KEY,
-    source           TEXT    NOT NULL,   -- X-Source pierwszego zgłoszenia
+    id               INTEGER PRIMARY KEY,         -- alias rowid, wewnętrzny
     idempotency_key  TEXT    NOT NULL UNIQUE,
+    source           TEXT    NOT NULL,            -- X-Source 1. zgłoszenia
     event_type       TEXT    NOT NULL,
-    payload_json     TEXT,               -- NULL po wyczyszczeniu (retencja)
-    payload_hash     TEXT    NOT NULL,   -- zostaje do wykrywania konfliktów
+    payload_json     TEXT,                        -- NULL po retencji
+    payload_hash     BLOB    NOT NULL,            -- SHA-256 kanonicznego JSON
     status           TEXT    NOT NULL CHECK (status IN
                        ('pending','processing','retrying','completed','failed')),
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    max_attempts     INTEGER NOT NULL,
-    next_attempt_at  TEXT    NOT NULL,   -- kiedy wolno podjąć
-    lease_owner      TEXT,               -- id workera + token rezerwacji
-    lease_expires_at TEXT,
+    attempts         INTEGER NOT NULL DEFAULT 0,  -- też token ogrodzenia
+    run_at           INTEGER NOT NULL,            -- ms; termin podjęcia / wygaśnięcia rezerwacji
     last_error       TEXT,
     result_json      TEXT,
-    traceparent      TEXT,               -- W3C trace context z żądania POST
-    created_at       TEXT    NOT NULL,
-    updated_at       TEXT    NOT NULL,
-    finished_at      TEXT,               -- completed lub failed
-    payload_purged_at TEXT
-);
+    traceparent      TEXT,                        -- W3C trace context z POST
+    created_at       INTEGER NOT NULL,            -- ms
+    finished_at      INTEGER                      -- ms; completed/failed
+) STRICT;
 
--- pobieranie pracy: tylko wiersze gotowe do podjęcia
-CREATE INDEX ix_events_ready ON webhook_events (next_attempt_at)
-    WHERE status IN ('pending', 'retrying');
--- odzyskiwanie porzuconych rezerwacji
-CREATE INDEX ix_events_lease ON webhook_events (lease_expires_at)
-    WHERE status = 'processing';
+-- pobieranie pracy i odzyskiwanie wygasłych rezerwacji — jeden indeks
+CREATE INDEX ix_events_due ON webhook_events (run_at)
+    WHERE status IN ('pending', 'retrying', 'processing');
 -- retencja
 CREATE INDEX ix_events_finished ON webhook_events (status, finished_at)
     WHERE finished_at IS NOT NULL;
-
-CREATE TABLE worker_heartbeats (
-    worker_id   TEXT PRIMARY KEY,
-    last_seen_at TEXT NOT NULL,
-    started_at  TEXT NOT NULL
-);
 ```
 
-Czas: ISO 8601 UTC [dla wykonawcy: format/typ, byle porównywalny
-leksykograficznie lub liczbowo w SQL].
+Uzasadnienia (do README):
 
-Ustawienia połączenia: `journal_mode=WAL`, `busy_timeout=5000`,
-`foreign_keys=ON` oraz **`synchronous=FULL`** [ustalone — decyzja
+- **`id` obok `idempotency_key`.** W SQLite każda zwykła tabela ma ukryty
+  `rowid`; `id INTEGER PRIMARY KEY` jest tylko jego aliasem — nie dodaje
+  kolumny ani indeksu. Indeks `UNIQUE` na kluczu istniałby także przy
+  `idempotency_key TEXT PRIMARY KEY`. Jedyna alternatywa bez duplikacji
+  klucza to `WITHOUT ROWID`, ale dokumentacja SQLite odradza ją dla dużych
+  wierszy (payload do 256 KiB), a indeksy częściowe przechowywałyby wtedy
+  cały klucz (do 255 B) zamiast 8-bajtowego `rowid`. `id` jest wewnętrzny —
+  worker operuje na nim, API wyłącznie na `idempotency_key`.
+- **Czasy jako `INTEGER` (Unix epoch, ms).** SQLite nie ma typu daty;
+  liczby dają poprawne porównania i prostą arytmetykę (`now + lease`,
+  backoff, progi retencji) bez parsowania. Podgląd w CLI:
+  `datetime(col/1000, 'unixepoch')`.
+- **`payload_hash` jako `BLOB`** — 32 B zamiast 64 znaków hex.
+- **`status` jako `TEXT` + `CHECK`** — świadomie: czytelność dla operatora w
+  `sqlite3` ważniejsza niż kilka bajtów enuma liczbowego.
+- **JSON jako `TEXT`** — funkcje JSON w SQLite 3.40 działają na TEXT.
+- **`STRICT`** — SQLite domyślnie przyjmie np. tekst w kolumnie liczbowej;
+  `STRICT` (≥ 3.37) wymusza deklarowane typy.
+- **`run_at` zamiast osobnych terminów** (wzorzec „visibility timeout”, jak
+  w SQS): dla `pending`/`retrying` to moment, od którego wolno podjąć; dla
+  `processing` — moment wygaśnięcia rezerwacji. Jedna kolumna i jeden
+  indeks obsługują i pobieranie pracy, i odzyskiwanie.
+- **Bez `lease_owner`** — ogrodzenie zapewnia numer próby (§8).
+- Usunięte jako zbędne: `max_attempts` (wartość globalna z konfiguracji),
+  `updated_at` (żadna logika jej nie używa; historię pokazują logi i
+  ślady), `payload_purged_at` (wynika z `payload_json IS NULL`), tabela
+  heartbeatów workerów (patrz §6 `/ready`).
+- Status `retrying` (formalnie „`pending` z `attempts > 0`”) zostaje —
+  daje operatorowi czytelny podział kolejki w metrykach.
+
+Ustawienia połączenia: `journal_mode=WAL`, `busy_timeout=5000` oraz **`synchronous=FULL`** [ustalone — decyzja
 zapisywana w README w sekcji tradeoffów]. Uzasadnienie: `202` jest
 obietnicą trwałości; w trybie WAL `synchronous=NORMAL` przetrwa awarię
 procesu, ale przy zaniku zasilania/awarii systemu może zgubić ostatnie
@@ -285,20 +304,27 @@ starcie każdego procesu [decyzja projektanta]; narzędzie migracji → TODO.
 ```
  POST (nowy klucz) ──► pending ──claim──► processing ──sukces──► completed
                           ▲                   │ │
-       lease wygasła,     │                   │ └─błąd, próby < max──► retrying ──(next_attempt_at)──claim──► processing
+       lease wygasła,     │                   │ └─błąd, próby < max──► retrying ──(run_at)──claim──► processing
        próby < max ───────┘                   │
                                               └─błąd lub lease wygasła, próby = max──► failed
 ```
 
 | Przejście | Kiedy dokładnie |
 |---|---|
-| → `pending` | w transakcji `INSERT` nowego zdarzenia, przed odpowiedzią `202`; `next_attempt_at = now` |
-| `pending`/`retrying` → `processing` | worker atomowo rezerwuje: jeden `UPDATE … WHERE id IN (SELECT … ORDER BY next_attempt_at LIMIT k) RETURNING *`; ustawia `lease_owner`, `lease_expires_at = now + LEASE`, `attempts += 1` |
-| `processing` → `completed` | symulacja zakończona sukcesem; `UPDATE … WHERE id = ? AND status = 'processing' AND lease_owner = ?` zapisuje wynik, status i `finished_at` w jednej instrukcji |
-| `processing` → `retrying` | symulacja rzuciła błąd i `attempts < max_attempts`; `next_attempt_at = now + backoff(attempts)`; `last_error` zapisany |
-| `processing` → `failed` | błąd przy `attempts = max_attempts`; stan końcowy |
-| `processing` → `pending` | rezerwacja wygasła (worker padł / restart) i `attempts < max_attempts`; wykonywane przez worker przy pobieraniu pracy |
-| `processing` → `failed` (wygasła) | rezerwacja wygasła przy `attempts = max_attempts`; `last_error = "lease expired"` |
+| → `pending` | w transakcji `INSERT` nowego zdarzenia, przed odpowiedzią `202`; `run_at = now`, `attempts = 0` |
+| `pending`/`retrying` → `processing` | worker atomowo rezerwuje: jeden `UPDATE … WHERE id IN (SELECT id … WHERE status IN ('pending','retrying') AND run_at <= now ORDER BY run_at LIMIT k) RETURNING *`; ustawia `run_at = now + LEASE`, `attempts += 1` |
+| `processing` → `completed` | symulacja zakończona sukcesem; `UPDATE … WHERE id = ? AND status = 'processing' AND attempts = ?` (numer próby z claimu) zapisuje wynik, status i `finished_at` w jednej instrukcji |
+| `processing` → `retrying` | symulacja rzuciła błąd i `attempts < MAX_ATTEMPTS`; ten sam warunek ogrodzenia; `run_at = now + backoff(attempts)`; `last_error` zapisany |
+| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; ten sam warunek ogrodzenia; stan końcowy, `finished_at` ustawione |
+| `processing` → `pending` | rezerwacja wygasła (`status = 'processing' AND run_at <= now` — worker padł / restart) i `attempts < MAX_ATTEMPTS`; osobna instrukcja wykonywana przez worker przed claimem (liczy `webhook_lease_recoveries_total`) |
+| `processing` → `failed` (wygasła) | rezerwacja wygasła przy `attempts = MAX_ATTEMPTS`; `last_error = "lease expired"`, `finished_at` ustawione |
+
+**Ogrodzenie (fencing) przez numer próby.** Każdy claim zwiększa
+`attempts`, więc numer próby jednoznacznie identyfikuje bieżącą
+rezerwację. Worker, którego rezerwacja wygasła, ma nieaktualny numer — jego
+`UPDATE` nie trafia w żaden wiersz i wynik jest odrzucany (log + metryka).
+Identyfikator workera trafia do logów, spanów i `result_json`, nie do
+schematu.
 
 Parametry domyślne (konfigurowalne) [decyzja projektanta]:
 `MAX_ATTEMPTS=5`, `LEASE_SECONDS=30` (> maks. czasu symulacji 5 s),
@@ -317,7 +343,6 @@ Duplikat w dowolnym stanie dostaje aktualny status.
   `POLL_INTERVAL` (0,5 s); gdy pracy jest dużo — dobiera od razu.
 - Operacje SQLite wykonywane poza pętlą zdarzeń (`asyncio.to_thread` lub
   dedykowany wątek) [dla wykonawcy].
-- Heartbeat do `worker_heartbeats` co 5 s.
 - Graceful shutdown (SIGTERM): przestaje pobierać, czeka na trwające zadania
   do `SHUTDOWN_GRACE` (10 s); niedokończone odzyskają się po wygaśnięciu
   rezerwacji. W compose `stop_grace_period: 20s` (> `SHUTDOWN_GRACE`), żeby
@@ -327,7 +352,7 @@ Duplikat w dowolnym stanie dostaje aktualny status.
   idempotentna, więc to bezpieczne.
 - Pomocniczy serwer HTTP na `WORKER_METRICS_PORT` (domyślnie 9100) z
   `/metrics` (metryki procesu workera: czasy przetwarzania, wyniki prób) i
-  `/health` — dostępny w sieci compose, **niepublikowany na hoście**, żeby
+  `/health` (używany przez healthcheck Dockera) — dostępny w sieci compose, **niepublikowany na hoście**, żeby
   `--scale worker=N` nie kolidował o port [decyzja projektanta, po
   recenzji].
 - Skalowanie: `docker compose up --scale worker=N`; poprawność gwarantuje
@@ -370,10 +395,9 @@ propozycja]:
 
 | Dane | Domyślnie | Co się dzieje |
 |---|---|---|
-| `payload_json` i `result_json` zdarzeń `completed` | 7 dni od `finished_at` | ustawiane na `NULL`, `payload_purged_at` ustawione |
+| `payload_json` i `result_json` zdarzeń `completed` | 7 dni od `finished_at` | ustawiane na `NULL` |
 | cały wiersz `completed` (klucz + hash + status) | 30 dni od `finished_at` | wiersz usuwany |
 | cały wiersz `failed` (z payloadem — do diagnozy) | 30 dni od `finished_at` | wiersz usuwany |
-| heartbeaty nieaktywnych workerów | 1 dzień | usuwane |
 
 Zdarzenia niezakończone nigdy nie są usuwane.
 
@@ -410,7 +434,6 @@ zapisu na długo.
   - `webhook_queue_oldest_pending_age_seconds` (gauge — najważniejszy sygnał
     „kolejka nie nadąża”)
   - `webhook_lease_recoveries_total`
-  - `webhook_workers_alive` (gauge z tabeli heartbeatów)
   - Uwaga implementacyjna: eksporter Prometheus z OTel sam dokleja `_total`
     do liczników i jednostkę do histogramów — instrumenty nazywamy bez
     sufiksów (`webhooks_received`, `webhook_processing_duration` z jednostką
@@ -491,17 +514,22 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 - Kod (pakiet Pythona, `pyproject.toml`, ruff do formatowania/lintu).
 - `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`).
 - `docker-compose.yml`: `api`, `worker`, `jaeger`; nazwany wolumen z plikiem
-  bazy; healthcheck API na `/ready`; `stop_grace_period: 20s` dla workera.
+  bazy; healthcheck API na `/ready`; healthcheck workera na jego `/health`
+  (port 9100 w sieci compose); `stop_grace_period: 20s` dla workera.
 - Zmiana devcontainera: feature `docker-in-docker`.
 - README: architektura, gwarancje (§4), tradeoffy, uruchomienie (lokalnie i
   w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego,
   założenia skalowalności, sekcja **TODO**. Sekcja tradeoffów musi jawnie
   opisywać co najmniej [ustalone]:
   - **Readiness API niezależne od workera** — co oznacza dla operatora
-    (`/ready` zielone przy niedziałającym workerze; jak wtedy wykryć
-    problem: `webhook_workers_alive`, `webhook_queue_oldest_pending_age_seconds`,
-    pole `workers_alive` w `/ready`) i dlaczego tak wybrano.
+    (`/ready` zielone przy niedziałającym workerze), jak wtedy wykryć
+    problem (healthcheck workera widoczny w `docker compose ps`;
+    rosnący `webhook_queue_oldest_pending_age_seconds`), świadome
+    ograniczenie (przy pustej kolejce API nie odróżnia bezczynnego workera
+    od martwego — brak tabeli heartbeatów) i dlaczego tak wybrano.
   - **`synchronous=FULL`** — dlaczego nie `NORMAL`, z pomiarem kosztu.
+  - **Schemat** — uzasadnienia z §7: `id` obok klucza, czasy INTEGER ms,
+    `STRICT`, scalenie terminów w `run_at`, ogrodzenie numerem próby.
   - Semantykę „dokładnie raz” (§4), dwuprogową retencję (§11), jeden
     proces uvicorn (§3), granicę jednego hosta (§16).
 - Ten dokument i zapis brainstormingu w `docs/superpowers/specs/`.
@@ -521,7 +549,6 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 - Struktura pakietów i nazwy modułów.
 - Biblioteka do konfiguracji (np. `pydantic-settings`) i do logów JSON.
 - Sposób wykonywania operacji SQLite poza pętlą zdarzeń.
-- Dokładny format czasu w bazie.
 - Szczegóły skryptu testu obciążeniowego i formatu raportu.
 - Treść sekcji TODO w README (minimum: HMAC, współdzielony rate limit,
   pełny stos obserwowalności, PostgreSQL/broker, narzędzie migracji,
