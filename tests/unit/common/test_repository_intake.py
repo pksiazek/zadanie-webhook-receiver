@@ -105,6 +105,10 @@ def test_concurrent_insert_same_key(tmp_path):
             .fetchone()
         )
         assert count == 1
+        (stored_source,) = (
+            setup.get().execute("SELECT source FROM webhook_events").fetchone()
+        )
+        assert {source for _, _, source in results} == {stored_source}
     finally:
         setup.close_all()
 
