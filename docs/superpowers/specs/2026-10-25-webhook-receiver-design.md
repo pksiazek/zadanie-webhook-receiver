@@ -529,7 +529,20 @@ tabela przepustowości dla N = 1, 2, 3, wynik kryteriów (PASS/FAIL). Wyniki
 
 ## 14. Testy
 
-pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
+**Testy są twardym wymaganiem** [ustalone]:
+
+- **Testy jednostkowe obowiązkowe** dla każdego modułu z logiką
+  (repozytorium, przejścia statusów, backoff, rate limiter, retencja,
+  worker, API), pisane **przed kodem** (TDD).
+- **Deterministyczne:** wstrzykiwany zegar, brak prawdziwych `sleep`
+  dłuższych niż ułamki sekundy, osobna baza dla każdego testu.
+- Podział: `tests/unit` (szybkie, izolowane) i `tests/integration` (API +
+  worker + prawdziwy SQLite, scenariusz restartu).
+- **Zielone testy są warunkiem ukończenia każdego zadania** w planie i
+  blokują CI.
+- **Próg pokrycia 85%** (`pytest-cov`, `fail_under = 85`) egzekwowany w CI.
+
+Narzędzie: pytest. Kluczowe obszary:
 
 - repozytorium: zapis nowego / duplikat (także z inną treścią); atomowy claim (dwóch
   konkurentów nie dostaje tego samego wiersza); warunkowy zapis wyniku po
@@ -588,7 +601,8 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 pull requeście, z krokami:
 
 1. `ruff check` i `ruff format --check`,
-2. `pytest` (testy jednostkowe i integracyjne z krótkim czasem symulacji),
+2. `pytest` z pokryciem (testy jednostkowe i integracyjne z krótkim czasem
+   symulacji; build pada poniżej 85% pokrycia — §14),
 3. `docker build` obrazu — weryfikuje Dockerfile [decyzja projektanta].
 
 Test obciążeniowy nie jest częścią CI (trwa kilkanaście minut i zależy od

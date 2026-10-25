@@ -352,3 +352,15 @@ heartbeatów liczby workerów nie widać w żadnej metryce — tylko
 
 **Decyzja: OpenTelemetry Collector jako rozszerzenie albo TODO — do
 decyzji w trakcie implementacji** (ostatnie, opcjonalne zadanie planu).
+
+## 18. Testy jednostkowe jako twarde wymaganie
+
+Pytanie użytkownika: czy jest zapis o konieczności testów jednostkowych?
+
+Odpowiedź: częściowo (zakres bonusowy, TDD, lista obszarów, pytest w CI),
+ale bez twardego wymagania na wzór lintera. Zaproponowano: testy
+jednostkowe obowiązkowe dla każdego modułu z logiką, TDD, deterministyczne
+(wstrzykiwany zegar), podział unit/integration, zielone testy warunkiem
+ukończenia zadania i blokadą CI, próg pokrycia 85% (`pytest-cov`).
+
+**Decyzja: zaakceptowane, próg 85%.**
