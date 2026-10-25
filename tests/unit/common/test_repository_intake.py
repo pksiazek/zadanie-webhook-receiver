@@ -1,6 +1,8 @@
 import sqlite3
 import threading
 
+import pytest
+
 from tests.fakes import FakeClock
 from webhook_receiver.common.db import ConnectionPool, init_schema
 from webhook_receiver.common.models import Status
@@ -66,7 +68,7 @@ def test_concurrent_insert_same_key(tmp_path):
     init_schema(setup.get())
     n = 8
     barrier = threading.Barrier(n, timeout=10)
-    results: list[tuple[int, bool]] = []
+    results: list[tuple[int, bool, str]] = []
     errors: list[BaseException] = []
     lock = threading.Lock()
 
@@ -76,10 +78,10 @@ def test_concurrent_insert_same_key(tmp_path):
             repo = EventRepository(pool, FakeClock())
             barrier.wait()
             ev, created = repo.insert_or_get(
-                "same", f"s{i}", "t", {"i": i}, None
+                "same", f"src-{i}", "t", {"i": i}, None
             )
             with lock:
-                results.append((ev.id, created))
+                results.append((ev.id, created, ev.source))
         except BaseException as exc:
             with lock:
                 errors.append(exc)
@@ -95,8 +97,8 @@ def test_concurrent_insert_same_key(tmp_path):
         assert not any(t.is_alive() for t in threads)
         assert errors == []
         assert len(results) == n
-        assert sum(1 for _, created in results if created) == 1
-        assert len({event_id for event_id, _ in results}) == 1
+        assert sum(1 for _, created, _ in results if created) == 1
+        assert len({event_id for event_id, _, _ in results}) == 1
         (count,) = (
             setup.get()
             .execute("SELECT COUNT(*) FROM webhook_events")
@@ -105,3 +107,28 @@ def test_concurrent_insert_same_key(tmp_path):
         assert count == 1
     finally:
         setup.close_all()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [Status.PROCESSING, Status.RETRYING, Status.COMPLETED, Status.FAILED],
+)
+def test_row_mapping_for_all_statuses(repo, tmp_path, status):
+    repo.insert_or_get("k", "s", "t", {"a": 1}, None)
+    conn = sqlite3.connect(tmp_path / "t.db")
+    try:
+        conn.execute(
+            "UPDATE webhook_events SET status = ?, result_json = ?,"
+            " last_error = ?, finished_at = ?, attempts = ?",
+            (status.value, '{"ok":true}', "boom", 1_700_000_005_000, 3),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    ev = repo.get("k")
+    assert ev.status is status
+    assert ev.result == {"ok": True}
+    assert ev.last_error == "boom"
+    assert ev.finished_at == 1_700_000_005_000
+    assert ev.attempts == 3
+    assert ev.payload == {"a": 1}

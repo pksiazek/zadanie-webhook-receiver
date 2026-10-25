@@ -68,12 +68,10 @@ class EventRepository:
             return _row_to_event(row), created
 
     def get(self, key: str) -> Event | None:
-        row = (
-            self._pool.get()
-            .execute(
-                "SELECT * FROM webhook_events WHERE idempotency_key = ?",
-                (key,),
-            )
-            .fetchone()
-        )
+        # Plain read outside a transaction (consistent snapshot under WAL).
+        conn = self._pool.get()
+        row = conn.execute(
+            "SELECT * FROM webhook_events WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
         return None if row is None else _row_to_event(row)
