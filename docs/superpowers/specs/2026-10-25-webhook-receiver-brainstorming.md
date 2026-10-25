@@ -517,3 +517,14 @@ Po merge PR #1 (Task 0) przez koordynatora użytkownik zastrzegł: **nie
 zamykać PR samodzielnie — merge robi użytkownik po zweryfikowaniu kodu.**
 Koordynator: PR + zielone CI + recenzja z komentarzem, potem czeka na merge
 przez użytkownika; kolejne zadanie od zaktualizowanego `main`.
+
+## 30. uv z cache wszędzie
+
+Pytanie użytkownika: CI za każdym razem robi `pip install` — jak to wpływa
+na czas, czy nie ma cache? Pomiar: 11 z 15 s przebiegu to instalacja, bez
+cache. Opcje: cache pip w setup-python, uv z cache, bez zmian.
+**Decyzja: uv z cache wszędzie** — `uv.lock`, CI na `astral-sh/setup-uv`
+z cache, devcontainer instaluje uv (wolumen na cache, interpreter z
+`.venv`), Dockerfile z uv i cache mount, job `docker` z cache warstw
+`type=gha`. Wprowadzone w PR #3 (runda poprawek 2 Task 1); instalacja w
+CI ~1 s.

@@ -715,7 +715,8 @@ Narzędzie: pytest. Kluczowe obszary:
 
 ## 15. Dostarczane artefakty
 
-- Kod (pakiet Pythona, `pyproject.toml`, konfiguracja ruff — §15a).
+- Kod (pakiet Pythona, `pyproject.toml`, `uv.lock`, konfiguracja ruff —
+  §15a).
 - `.github/workflows/ci.yml` — lint, testy, build obrazu (§15a).
 - `benchmarks/` — cztery benchmarki z §13a.
 - `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`):
@@ -827,6 +828,13 @@ pull requeście, z krokami:
 2. `pytest` z pokryciem (testy jednostkowe i integracyjne z krótkim czasem
    symulacji; build pada poniżej 85% pokrycia — §14),
 3. `docker build` obrazu — weryfikuje Dockerfile [decyzja projektanta].
+
+**Zależności przez uv z cache wszędzie** [ustalone]: `uv.lock` w repo i
+instalacja `uv sync --locked` (te same wersje lokalnie, w CI i w obrazie);
+cache uv w CI (`astral-sh/setup-uv`), w devcontainerze (wolumen) i w
+Dockerze (cache mount + osobna warstwa zależności); job `docker` w CI z
+cache warstw `type=gha`. Pomiar: instalacja w CI spadła z ~11 s (pip, bez
+cache) do ~1 s.
 
 Test obciążeniowy nie jest częścią CI (trwa kilkanaście minut i zależy od
 sprzętu) — uruchamiany ręcznie, wyniki w README. Status workflow

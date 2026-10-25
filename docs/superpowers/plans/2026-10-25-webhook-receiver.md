@@ -12,7 +12,7 @@ slotów) pobiera je atomową rezerwacją (lease) z kontrolą numeru próby (fenc
 SQLite jest jednocześnie magazynem i kolejką. Ślad OTel przechodzi przez
 granicę procesów kolumną `traceparent`.
 
-**Tech Stack:** Python 3.14, FastAPI, uvicorn, pydantic-settings, sqlite3
+**Tech Stack:** Python 3.14, uv (zależności, `uv.lock`), FastAPI, uvicorn, pydantic-settings, sqlite3
 (stdlib), OpenTelemetry SDK + eksportery Prometheus/OTLP, prometheus-client,
 pytest (+ pytest-asyncio, pytest-cov), httpx, ruff, Docker Compose v2,
 Jaeger, GitHub Actions.
@@ -32,7 +32,8 @@ PR**:
    (np. `task/03-repository-intake`).
 2. Świeży subagent-implementer dostaje zadanie z planu, ścieżkę do spec i
    nazwę gałęzi; pracuje w TDD, robi commity na gałęzi i kończy na
-   zielonych `ruff check .`, `ruff format --check .` i `pytest`.
+   zielonych `uv run ruff check .`, `uv run ruff format --check .` i
+   `uv run pytest`.
 3. Push gałęzi i `gh pr create` z tytułem `Task NN: <tytuł zadania>`. Opis
    PR: cel, lista plików, link do sekcji planu i spec, wynik testów
    lokalnych; ostatnia linia
@@ -81,8 +82,15 @@ gałęzi; tytuł PR ma postać `Task NN: <tytuł zadania>`.
 - Testy: TDD, deterministyczne (wstrzykiwany zegar, brak `sleep` > 0,1 s),
   osobny plik bazy na test (`tmp_path`); `tests/unit` i `tests/integration`;
   pokrycie ≥ **85%** liczone tylko dla `src/webhook_receiver`.
-- Każde zadanie kończy się zielonymi `ruff check .`, `ruff format --check .`
-  i `pytest` — to warunek ukończenia zadania.
+- Każde zadanie kończy się zielonymi `uv run ruff check .`,
+  `uv run ruff format --check .` i `uv run pytest` — to warunek ukończenia
+  zadania.
+- Zależności przez **uv** [ustalone]: `uv.lock` w repo, instalacja
+  `uv sync --locked --extra dev --extra loadtest`, narzędzia przez
+  `uv run …`; nowa zależność = wpis `==` w `pyproject.toml` + `uv lock` w
+  tym samym commicie. Cache uv: w CI (`astral-sh/setup-uv`,
+  `enable-cache`), w devcontainerze (wolumen `~/.cache/uv`), w Dockerze
+  (`--mount=type=cache`).
 - Język: identyfikatory, komentarze i komunikaty w kodzie po angielsku;
   README po polsku [decyzja planu].
 - Każde zadanie = gałąź `task/NN-…` + PR + zielone CI + akceptacja
@@ -259,27 +267,30 @@ def test_lease_must_exceed_simulation():
 
 - [ ] **Step 3: Uruchom — FAIL**
 
-Run: `pip install -e ".[dev,loadtest]" && pytest tests/unit/common/test_config.py -v`
+Run: `uv sync --extra dev --extra loadtest && uv run pytest tests/unit/common/test_config.py -v`
 Expected: FAIL (`ImportError: Settings`).
 
 - [ ] **Step 4: Zaimplementuj `config.py`, `clock.py`, `tests/fakes.py`**
 
-- [ ] **Step 5: Uruchom — PASS** (`pytest tests/unit/common/test_config.py -v`)
+- [ ] **Step 5: Uruchom — PASS** (`uv run pytest tests/unit/common/test_config.py -v`)
 
 - [ ] **Step 6: `.github/workflows/ci.yml`**
 
 Trigger `push` tylko dla gałęzi `main` oraz `pull_request` (bez podwójnych
 uruchomień dla PR); job `test` na `ubuntu-latest`,
-`actions/setup-python` z `python-version: "3.14"`; kroki:
-`pip install -e ".[dev,loadtest]"`, `ruff check .`, `ruff format --check .`,
-`pytest`. (Krok `docker build` dochodzi w Task 13.) Próg 85% obowiązuje
+`astral-sh/setup-uv` (przypięta wersja, `enable-cache: true`,
+`cache-dependency-glob: "uv.lock"`, `python-version: "3.14"`); kroki:
+`uv sync --locked --extra dev --extra loadtest`, `uv run ruff check .`,
+`uv run ruff format --check .`, `uv run pytest`. `uv.lock` commitowany;
+devcontainer instaluje uv i robi `uv sync` w `post-create.sh`, z wolumenem
+na cache uv i interpreterem `.venv` [ustalone w rundzie poprawek 2]. (Krok `docker build` dochodzi w Task 13.) Próg 85% obowiązuje
 od pierwszego commita — każde zadanie dodaje kod razem z testami, więc
 pokrycie nie powinno spaść poniżej progu; jeśli spadnie, zadanie nie jest
 ukończone.
 
 - [ ] **Step 7: Lint, commit i PR**
 
-Run: `ruff check . && ruff format --check . && pytest`
+Run: `uv run ruff check . && uv run ruff format --check . && uv run pytest`
 Commit na gałęzi `task/01-skeleton` (`feat: project skeleton, settings,
 clock, CI`), PR wg „Sposobu wykonania”; ten PR jest pierwszym, na którym
 uruchamia się CI.
@@ -362,7 +373,7 @@ def test_pool_returns_connection_per_thread(tmp_path):
     # pool.get() w wątku głównym is pool.get(); w innym wątku — inny obiekt
 ```
 
-- [ ] **Step 2: Uruchom — FAIL** (`pytest tests/unit/common/test_db.py -v`)
+- [ ] **Step 2: Uruchom — FAIL** (`uv run pytest tests/unit/common/test_db.py -v`)
 
 - [ ] **Step 3: Zaimplementuj `db.py` i `models.py`**
 
@@ -985,7 +996,7 @@ def test_separate_worker_process_shares_database(tmp_path)
 
 - [ ] **Step 2: Uruchom całość**
 
-Run: `pytest -v`
+Run: `uv run pytest -v`
 Expected: PASS, pokrycie ≥ 85%.
 
 - [ ] **Step 3: Lint, commit i PR** (`test: end-to-end and restart scenarios`)
@@ -1005,11 +1016,19 @@ Expected: PASS, pokrycie ≥ 85%.
 
 - [ ] **Step 1: `Dockerfile`**
 
-`FROM python:3.14-slim`; `pip install --no-cache-dir .[loadtest]`; kopiuje
-`src/`, `loadtest/`, `benchmarks/`, `pyproject.toml`; użytkownik `app`
-(UID 10001); `mkdir -p /data && chown app:app /data`; `ENV
-DB_PATH=/data/webhooks.db PYTHONUNBUFFERED=1`; `USER app`; `EXPOSE 8000
-9100`; `ENTRYPOINT ["python", "-m", "webhook_receiver"]`; `CMD ["api"]`.
+`FROM python:3.14-slim`; uv z oficjalnego obrazu: `COPY
+--from=ghcr.io/astral-sh/uv:<wersja zgodna z devcontainerem> /uv /uvx
+/bin/`; `WORKDIR /app`; `ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1`.
+Warstwa zależności osobno od kodu (cache warstw): `COPY pyproject.toml
+uv.lock ./` i `RUN --mount=type=cache,target=/root/.cache/uv uv sync
+--locked --no-dev --no-install-project`; potem `COPY src/ src/` i `RUN
+--mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev`
+(w Task 14/15 dochodzi `--extra loadtest` oraz `COPY loadtest/` /
+`COPY benchmarks/` — ruling z pre-flight). Użytkownik `app` (UID 10001);
+`mkdir -p /data && chown app:app /data`; `ENV DB_PATH=/data/webhooks.db
+PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"`; `USER app`; `EXPOSE 8000
+9100`; `ENTRYPOINT ["python", "-m", "webhook_receiver"]` (python z
+`.venv` przez `PATH`); `CMD ["api"]`.
 
 - [ ] **Step 2: `docker-compose.yml`**
 
@@ -1043,8 +1062,10 @@ Run: `docker compose stop worker` → `docker compose ps` pokazuje workery
 
 - [ ] **Step 4: Krok CI**
 
-W `ci.yml` dodaj job `docker` (`needs: test`): `docker build -t
-webhook-receiver .`.
+W `ci.yml` dodaj job `docker` (`needs: test`): `docker/setup-buildx-action`
++ `docker/build-push-action` (`push: false`, `tags: webhook-receiver:ci`,
+`cache-from: type=gha`, `cache-to: type=gha,mode=max`) — cache warstw
+między przebiegami; akcje przypięte do wydanych wersji.
 
 - [ ] **Step 5: Commit i PR; sprawdź zielony workflow**
 
@@ -1168,8 +1189,8 @@ proporcjonalnie do rozmiaru (indeks).
 
 - [ ] **Step 1: Napisz README (po polsku)** — sekcje i obowiązkowe treści:
   badge CI; opis i architektura (diagram z §5); gwarancje „dokładnie raz”
-  z restartem API (§4); uruchomienie: lokalnie (`pip install -e .[dev]`,
-  `EMBEDDED_WORKER=true python -m webhook_receiver api`), Docker na
+  z restartem API (§4); uruchomienie: lokalnie (`uv sync --extra dev`,
+  `EMBEDDED_WORKER=true uv run python -m webhook_receiver api`), Docker na
   „gołym” hoście (`docker compose up -d --build`, skalowanie `--scale
   worker=N`); `curl` na pięciu webhookach z gistu (`evt-001…005`) +
   duplikat + `fail_once`/`fail_always`; API (tabela kodów, kolejność
