@@ -462,3 +462,8 @@ Decyzje użytkownika (rekomendacje projektanta przyjęte):
   `last_error = "lease expired"`), nie w `pending`.
 
 **Decyzja: wprowadzić wszystkie poprawki zgodnie z rekomendacją.**
+
+## 24. Akceptacja
+
+**Dokument projektowy zaakceptowany przez użytkownika (2026-10-25).**
+Następny krok: plan implementacji (`superpowers:writing-plans`).

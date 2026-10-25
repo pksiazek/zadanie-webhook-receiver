@@ -1,7 +1,7 @@
 # Webhook Receiver Service — dokument projektowy
 
 - **Data:** 2026-10-25
-- **Status:** do akceptacji
+- **Status:** zaakceptowany (2026-10-25)
 - **Zadanie źródłowe:** <https://gist.github.com/kaluzaaa/fcd035829013d9952f71a9a6a59a4d2f#file-gist_webhook_receiver-md>
 - **Przebieg ustaleń:** [2026-10-25-webhook-receiver-brainstorming.md](2026-10-25-webhook-receiver-brainstorming.md)
 
