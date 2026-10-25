@@ -8,7 +8,7 @@ retencją, obserwowalnością OTel, testem obciążeniowym i benchmarkami.
 
 **Architecture:** Dwa procesy z jednego obrazu — `api` (FastAPI, jeden
 proces uvicorn) zapisuje zdarzenia do SQLite (WAL), `worker` (asyncio, N
-slotów) pobiera je atomowym claimem z lease i ogrodzeniem numerem próby.
+slotów) pobiera je atomową rezerwacją (lease) z kontrolą numeru próby (fencing).
 SQLite jest jednocześnie magazynem i kolejką. Ślad OTel przechodzi przez
 granicę procesów kolumną `traceparent`.
 
@@ -36,7 +36,7 @@ Jaeger, GitHub Actions.
 - Tabela `webhook_events` i indeksy dokładnie jak w §7 (z
   `ix_events_ready (run_at, status) WHERE status IN ('pending','retrying')`
   i `ix_events_leased (run_at) WHERE status = 'processing'`); zapytania
-  claim/recover/stats powtarzają dosłownie warunki indeksów.
+  rezerwacji, odzyskiwania i statystyk powtarzają dosłownie warunki indeksów.
 - API: **jeden** proces uvicorn (bez `--workers`).
 - PEP 8 przez ruff: reguły `E, W, N, F, I, B, UP`, `line-length = 79`,
   `target-version = "py314"`; `ruff check` i `ruff format --check` zielone
@@ -58,7 +58,7 @@ Jaeger, GitHub Actions.
    samym momencie) — dokładnie jedna odpowiedź `202`, pozostałe `200
    duplicate`, jeden wiersz. Test: Task 3 (`test_concurrent_insert_same_key`)
    i Task 10 (`test_concurrent_posts_same_key`).
-2. **Zniekształcone ciało `POST`** (nie-JSON, `payload` jako tablica/`null`,
+2. **Zniekształcone body `POST`** (nie-JSON, `payload` jako tablica/`null`,
    brak pól, klucz 256 znaków) — `422`, nigdy `500`. Test: Task 10
    (`test_post_invalid_bodies_return_422`).
 3. **Klucze ze spacją, `%`, `/`, `?`, `#`, UTF-8 i dokładnie 255 znaków** —
@@ -77,7 +77,7 @@ Jaeger, GitHub Actions.
 Jedna aplikacja: jeden pakiet, jeden obraz, dwa punkty wejścia
 (`python -m webhook_receiver api|worker`) [ustalone z użytkownikiem]. Jeden
 pakiet, bo kontrakt między procesami (schemat, statusy, `run_at`,
-ogrodzenie) musi być w jednej wersji po obu stronach.
+kontrola numeru próby) musi być w jednej wersji po obu stronach.
 
 ```
 src/webhook_receiver/
@@ -333,7 +333,7 @@ def test_pool_returns_connection_per_thread(tmp_path):
 
 ---
 
-### Task 3: Repozytorium — przyjęcie i odczyt
+### Task 3: Repozytorium — zapis i odczyt zdarzeń
 
 **Files:**
 - Create: `src/webhook_receiver/common/repository.py`,
@@ -389,7 +389,7 @@ Fixture `repo` (w `tests/conftest.py`): `FakeClock`, `ConnectionPool(tmp_path
 
 ---
 
-### Task 4: Repozytorium — claim, odzyskiwanie, wynik z ogrodzeniem
+### Task 4: Repozytorium — rezerwacja zdarzeń, odzyskiwanie po awarii workera, zapis wyniku z kontrolą numeru próby
 
 **Files:**
 - Modify: `src/webhook_receiver/common/repository.py`
@@ -401,7 +401,7 @@ Fixture `repo` (w `tests/conftest.py`): `FakeClock`, `ConnectionPool(tmp_path
     `UPDATE webhook_events SET status='processing', attempts=attempts+1,
     run_at=:now+:lease WHERE id IN (SELECT id FROM webhook_events WHERE
     status IN ('pending','retrying') AND run_at <= :now ORDER BY run_at
-    LIMIT :limit) RETURNING *`; zwraca zdarzenia po claimie (z nowym
+    LIMIT :limit) RETURNING *`; zwraca zarezerwowane zdarzenia (z nowym
     `attempts`).
   - `recover_expired(self, max_attempts: int) -> RecoveryResult` — dwie
     instrukcje w jednej transakcji, warunek `status = 'processing' AND
@@ -413,7 +413,7 @@ Fixture `repo` (w `tests/conftest.py`): `FakeClock`, `ConnectionPool(tmp_path
     `status='completed'`, `result_json`, `finished_at=now`,
     `last_error=NULL`; `False` = odrzucony (nieaktualna próba).
   - `record_failure(self, event_id: int, attempt: int, error: str,
-    retry_at: int | None) -> bool` — ten sam warunek ogrodzenia;
+    retry_at: int | None) -> bool` — ta sama kontrola numeru próby;
     `retry_at` → `retrying`, `run_at=retry_at`; `None` → `failed`,
     `finished_at=now`.
 
@@ -437,7 +437,7 @@ def test_recover_expired_moves_to_retrying_with_lease_expired(repo, clock)
     # status RETRYING, run_at == now, last_error == "lease expired"
 def test_recover_expired_at_max_attempts_fails(repo, clock)
 def test_queue_queries_use_partial_indexes(repo)
-    # EXPLAIN QUERY PLAN dla SQL claimu i recover: żaden wiersz planu nie
+    # EXPLAIN QUERY PLAN dla SQL rezerwacji i odzyskiwania: żaden wiersz planu nie
     # zaczyna się od "SCAN webhook_events"; claim używa ix_events_ready,
     # recover ix_events_leased
 ```
@@ -674,7 +674,7 @@ instrumentów (nie asercje), aby `/metrics` dawał nazwy z §12.
 
 ---
 
-### Task 9: Cache statystyk kolejki i middleware limitu ciała
+### Task 9: Cache statystyk kolejki i limit rozmiaru body
 
 **Files:**
 - Create: `src/webhook_receiver/api/queue_stats.py`,
@@ -691,7 +691,7 @@ instrumentów (nie asercje), aby `/metrics` dawał nazwy z §12.
     None`.
   - `class BodySizeLimitMiddleware` (czyste ASGI) — `__init__(self, app,
     max_bytes: int)`; `Content-Length > max_bytes` → `413` z JSON
-    `{"detail": "request body too large"}` bez czytania ciała; brak
+    `{"detail": "request body too large"}` bez czytania body; brak
     nagłówka → liczy bajty w `receive` i po przekroczeniu zwraca `413`.
 
 - [ ] **Step 1: Testy (failing)**
@@ -742,7 +742,7 @@ def test_body_limit_allows_small_body()
 Trasy (kolejność kontroli w `POST` z §6):
 
 - `POST /webhooks` — `async def` z `request: Request`; ręcznie: brak/pusty
-  lub > 64 znaków `X-Source` → `400`; ciało `WebhookIn.model_validate_json`
+  lub > 64 znaków `X-Source` → `400`; body `WebhookIn.model_validate_json`
   (błąd → `422`, `{"detail": <errors>}`); `limiter.check` → `429` +
   `Retry-After`; jeśli `stats.get().backlog >= max_backlog`: istniejący
   klucz (`repo.get` w `run_in_threadpool`) → `200` duplikat, inaczej `503`
@@ -778,7 +778,7 @@ def test_duplicate_returns_200_with_status(client)
     # drugi POST (także z innym payloadem i innym X-Source) → 200,
     # duplicate True, status "pending", source pierwszego zgłoszenia
 def test_missing_or_bad_x_source_is_400_before_validation(client)
-    # brak nagłówka + niepoprawne ciało → 400 (nie 422); "" i 65 znaków → 400
+    # brak nagłówka + niepoprawne body → 400 (nie 422); "" i 65 znaków → 400
 def test_post_invalid_bodies_return_422(client)
     # "not json", {"payload": []}, {"payload": None}, brak event_type,
     # idempotency_key "" i 256 znaków → 422; 255 znaków → 202
@@ -831,12 +831,12 @@ def test_post_stores_traceparent_of_request_span(client, span_exporter)
     `repo.recover_expired(max_attempts)` (w `asyncio.to_thread`; licznik
     `lease_recoveries`); (2) `free = concurrency − len(in_flight)`; jeśli
     `free > 0`: `claim(free, lease_ms)` i start zadania `process` dla
-    każdego; (3) czekanie: jeśli ostatni claim zwrócił 0 lub brak wolnych
+    każdego; (3) czekanie: jeśli ostatnia rezerwacja zwróciła 0 lub brak wolnych
     slotów → `asyncio.wait(in_flight | {stop_event, poll_timer},
     return_when=FIRST_COMPLETED)`, gdzie `poll_timer` = `sleep(poll)`
-    tylko gdy ostatni claim zwrócił 0; dzięki temu zwolnienie slotu od
+    tylko gdy ostatnia rezerwacja zwróciła 0; dzięki temu zwolnienie slotu od
     razu dobiera pracę (§9); (4) retencja co `retention_interval_seconds`
-    (wg `clock`). Po `stop()`: brak nowych claimów, `asyncio.wait(in_flight,
+    (wg `clock`). Po `stop()`: brak nowych rezerwacji, `asyncio.wait(in_flight,
     timeout=shutdown_grace_seconds)`, potem anulowanie pozostałych (ich
     lease wygaśnie).
   - `def stop(self) -> None`.
@@ -892,12 +892,12 @@ async def test_refills_slot_immediately(worker_env)
     # concurrency=1, poll_interval=5 s, 3 zdarzenia → wszystkie COMPLETED
     # w < 1 s (dowód, że dobieranie nie czeka na poll)
 async def test_recovers_expired_lease_from_dead_worker(worker_env)
-    # ręczny claim (symulacja padniętego workera), czekanie > lease →
+    # ręczna rezerwacja (symulacja padniętego workera), czekanie > lease →
     # nowy Worker kończy zdarzenie, attempts == 2
 async def test_stale_completion_is_rejected_and_counted(worker_env)
 async def test_stop_finishes_in_flight(worker_env)
     # simulated 0.3 s, start, po 0.05 s stop() → run() kończy się,
-    # zdarzenie COMPLETED, brak nowych claimów po stop
+    # zdarzenie COMPLETED, brak nowych rezerwacji po stop
 async def test_process_span_is_child_of_post_span(worker_env, span_exporter)
 async def test_retention_runs_on_interval(worker_env)
 

@@ -14,7 +14,7 @@ Oznaczenia: **[ustalone]** — decyzja podjęta wspólnie z autorem zadania;
 Zadanie rekrutacyjne: prototyp serwisu HTTP w Pythonie, który przyjmuje
 webhooki (JSON z `idempotency_key`), gwarantuje ich przetworzenie i udostępnia
 status każdego zdarzenia. Oceniający patrzą na **sposób myślenia**:
-niezawodność, idempotencję, rozdzielenie przyjęcia od przetwarzania, model
+niezawodność, idempotencję, rozdzielenie przyjmowania webhooków od przetwarzania, model
 danych, obserwowalność i jawnie nazwane kompromisy. Kod ma być działający,
 zgodny z PEP 8, ale ważniejsza jest architektura i uzasadnienia w README.
 
@@ -95,13 +95,13 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 Dokładnie-raz end-to-end jest niemożliwe bez współpracy efektu ubocznego.
 Gwarantujemy [ustalone — do opisania w README]:
 
-- **Przyjęcie dokładnie raz:** `UNIQUE(idempotency_key)` w SQLite;
+- **Zapis zdarzenia dokładnie raz:** `UNIQUE(idempotency_key)` w SQLite;
   zapis i decyzja „nowe/duplikat” w jednej transakcji.
 - **Wykonanie co najmniej raz:** jeśli worker padnie w trakcie, rezerwacja
   (lease) wygasa i zdarzenie jest podejmowane ponownie.
 - **Efekt dokładnie raz:** zapis wyniku jest warunkowy — tylko ze stanu
   `processing` i tylko dla aktualnego numeru próby (`attempts` działa jak
-  token ogrodzenia, patrz §8), więc spóźniony worker z wygasłą rezerwacją
+  znacznik rezerwacji — kontrola numeru próby, patrz §8), więc spóźniony worker z wygasłą rezerwacją
   nie nadpisze wyniku. Prawdziwy efekt uboczny musiałby
   być idempotentny względem klucza — to opisujemy jako założenie.
 - **Restart lub awaria API między `COMMIT` a wysłaniem `202`:** klient nie
@@ -124,7 +124,7 @@ Gwarantujemy [ustalone — do opisania w README]:
 obciążeniowego (przyjmowanie stabilne, przetwarzanie kolejkuje się i
 odrabia), a SQLite jako kolejka eliminuje problem dual-write — wiersz ze
 statusem `pending` *jest* zadaniem, zapisanym w tej samej transakcji co
-przyjęcie.
+zapis zdarzenia.
 
 Dodatkowo [decyzja projektanta]: przełącznik konfiguracyjny
 `EMBEDDED_WORKER=true` uruchamiający worker w procesie API — wyłącznie dla
@@ -137,7 +137,7 @@ a metryki workera trafiają na `/metrics` API.
 ```
  nadawcy ──HTTP──► [ api (FastAPI, uvicorn) ] ──INSERT (tx)──► [ SQLite (WAL) ]
                      │ rate limit per X-Source                   ▲   │
-                     │ walidacja, idempotencja                    │   │ claim (UPDATE…RETURNING)
+                     │ walidacja, idempotencja                    │   │ rezerwacja (UPDATE…RETURNING)
                      │ /metrics /health /ready                    │   ▼
                                                      [ worker(s) (asyncio, N slotów) ]
                                                        │ symulacja, retry, lease,
@@ -156,7 +156,7 @@ nagłówka nie wymaga.
 
 ### `POST /webhooks`
 
-Ciało:
+Body:
 
 ```json
 {
@@ -181,14 +181,14 @@ normalizują takie segmenty. Klucze ze znakami sterującymi są dozwolone —
 w logach JSON są escapowane przez serializator.
 `X-Source` — niepusty string, maks. 64 znaki;
 `event_type` — niepusty string; `payload` — obiekt JSON. Limit rozmiaru
-ciała: 256 KiB → `413` [decyzja projektanta] — wymaga własnego middleware
-(Starlette/uvicorn nie limitują ciała): sprawdzenie `Content-Length` oraz
+body: 256 KiB → `413` [decyzja projektanta] — wymaga własnego middleware
+(Starlette/uvicorn nie limitują rozmiaru body): sprawdzenie `Content-Length` oraz
 liczenie bajtów przy czytaniu strumienia (żądania chunked). Błędy
 walidacji → `422`.
 
 Odpowiedzi:
 
-| Sytuacja | Kod | Ciało |
+| Sytuacja | Kod | Body |
 |---|---|---|
 | nowe zdarzenie, zapisane trwale | `202 Accepted` | `{idempotency_key, status: "pending", status_url}` + nagłówek `Location` |
 | duplikat (ten sam `idempotency_key`) | `200 OK` | aktualny status (jak w `GET`), pole `duplicate: true` |
@@ -197,7 +197,7 @@ Odpowiedzi:
 | przekroczony próg zaległości (backpressure) | `503` + `Retry-After` [decyzja projektanta] | opis |
 
 **Kolejność kontroli w `POST`** [decyzja projektanta, po recenzji]:
-`X-Source` (`400`) → rozmiar (`413`) → walidacja ciała (`422`) → rate
+`X-Source` (`400`) → rozmiar (`413`) → walidacja body (`422`) → rate
 limit (`429`; duplikaty też się liczą) → backpressure → zapis. Przy
 przekroczonym progu zaległości serwis najpierw sprawdza, czy klucz już
 istnieje: **duplikat dostaje `200` z aktualnym statusem, a nie `503`**
@@ -279,7 +279,7 @@ CREATE TABLE webhook_events (
     payload_json     TEXT,                        -- NULL po retencji
     status           TEXT    NOT NULL CHECK (status IN
                        ('pending','processing','retrying','completed','failed')),
-    attempts         INTEGER NOT NULL DEFAULT 0,  -- też token ogrodzenia
+    attempts         INTEGER NOT NULL DEFAULT 0,  -- też znacznik rezerwacji
     run_at           INTEGER NOT NULL,            -- ms; termin podjęcia / wygaśnięcia rezerwacji
     last_error       TEXT,
     result_json      TEXT,
@@ -328,14 +328,14 @@ Uzasadnienia (do README):
   częściowego tylko wtedy, gdy warunek zapytania zawiera **dosłownie**
   warunek indeksu („SQLite does not do algebra”). Dlatego
   `ix_events_ready` ma warunek `status IN ('pending','retrying')`
-  identyczny z claimem i gauge'ami, a `ix_events_leased` — `status =
+  identyczny z rezerwacją zdarzeń i gauge'ami, a `ix_events_leased` — `status =
   'processing'` identyczny z odzyskiwaniem. Kolumna `status` w
   `ix_events_ready` czyni indeks pokrywającym dla licznika per status.
-  Zweryfikowane `EXPLAIN QUERY PLAN` (claim, odzyskiwanie, gauge'e,
+  Zweryfikowane `EXPLAIN QUERY PLAN` (rezerwacja, odzyskiwanie, gauge'e,
   retencja — bez `SCAN` tabeli). **Wymóg:** test jednostkowy asertujący
   plan zapytania dla każdego z tych zapytań, żeby regresja nie została
   niezauważona do benchmarku nr 2.
-- **Bez `lease_owner`** — ogrodzenie zapewnia numer próby (§8).
+- **Bez `lease_owner`** — wystarcza kontrola numeru próby (§8).
 - Usunięte jako zbędne: `max_attempts` (wartość globalna z konfiguracji),
   `updated_at` (żadna logika jej nie używa; historię pokazują logi i
   ślady), `payload_purged_at` (wynika z `payload_json IS NULL`), tabela
@@ -384,9 +384,9 @@ procesów startuje równocześnie) [decyzja projektanta]; narzędzie migracji
 ## 8. Cykl życia zdarzenia (statusy)
 
 ```
- POST (nowy klucz) ──► pending ──claim──► processing ──sukces──► completed
+ POST (nowy klucz) ──► pending ──rezerwacja──► processing ──sukces──► completed
                                               │ │
-                                              │ ├─błąd, próby < max──────────► retrying ──(run_at)──claim──► processing
+                                              │ ├─błąd, próby < max──────────► retrying ──(run_at)──rezerwacja──► processing
                                               │ └─lease wygasła, próby < max─► retrying
                                               │
                                               └─błąd lub lease wygasła, próby = max──► failed
@@ -396,13 +396,13 @@ procesów startuje równocześnie) [decyzja projektanta]; narzędzie migracji
 |---|---|
 | → `pending` | w transakcji `INSERT` nowego zdarzenia, przed odpowiedzią `202`; `run_at = now`, `attempts = 0` |
 | `pending`/`retrying` → `processing` | worker atomowo rezerwuje: jeden `UPDATE … WHERE id IN (SELECT id … WHERE status IN ('pending','retrying') AND run_at <= now ORDER BY run_at LIMIT k) RETURNING *`; ustawia `run_at = now + LEASE`, `attempts += 1` |
-| `processing` → `completed` | symulacja zakończona sukcesem; `UPDATE … WHERE id = ? AND status = 'processing' AND attempts = ?` (numer próby z claimu) zapisuje wynik, status i `finished_at` w jednej instrukcji |
-| `processing` → `retrying` | symulacja rzuciła błąd i `attempts < MAX_ATTEMPTS`; ten sam warunek ogrodzenia; `run_at = now + backoff(attempts)`; `last_error` zapisany |
-| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; ten sam warunek ogrodzenia; stan końcowy, `finished_at` ustawione |
-| `processing` → `retrying` (odzyskanie) | rezerwacja wygasła (`status = 'processing' AND run_at <= now` — worker padł / restart) i `attempts < MAX_ATTEMPTS`; `run_at = now`, `last_error = "lease expired"`; osobna instrukcja wykonywana przez worker przed claimem (liczy `webhook_lease_recoveries_total`) [ustalone] |
+| `processing` → `completed` | symulacja zakończona sukcesem; `UPDATE … WHERE id = ? AND status = 'processing' AND attempts = ?` (numer próby z rezerwacji) zapisuje wynik, status i `finished_at` w jednej instrukcji |
+| `processing` → `retrying` | symulacja rzuciła błąd i `attempts < MAX_ATTEMPTS`; ta sama kontrola numeru próby; `run_at = now + backoff(attempts)`; `last_error` zapisany |
+| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; ta sama kontrola numeru próby; stan końcowy, `finished_at` ustawione |
+| `processing` → `retrying` (odzyskanie) | rezerwacja wygasła (`status = 'processing' AND run_at <= now` — worker padł / restart) i `attempts < MAX_ATTEMPTS`; `run_at = now`, `last_error = "lease expired"`; osobna instrukcja wykonywana przez worker przed rezerwacją (liczy `webhook_lease_recoveries_total`) [ustalone] |
 | `processing` → `failed` (wygasła) | rezerwacja wygasła przy `attempts = MAX_ATTEMPTS`; `last_error = "lease expired"`, `finished_at` ustawione |
 
-**Ogrodzenie (fencing) przez numer próby.** Każdy claim zwiększa
+**Kontrola numeru próby (fencing).** Każda rezerwacja zwiększa
 `attempts`, więc numer próby jednoznacznie identyfikuje bieżącą
 rezerwację. Worker, którego rezerwacja wygasła, ma nieaktualny numer — jego
 `UPDATE` nie trafia w żaden wiersz i wynik jest odrzucany (log + metryka).
@@ -429,7 +429,7 @@ Duplikat w dowolnym stanie dostaje aktualny status.
 - **Dobiera pracę natychmiast po zwolnieniu dowolnego slotu**
   (`asyncio.wait(..., return_when=FIRST_COMPLETED)` lub semafor + sygnał),
   porcją równą liczbie wolnych slotów. `POLL_INTERVAL` (0,5 s) dotyczy
-  tylko sytuacji, gdy ostatni claim zwrócił 0 wierszy [decyzja projektanta,
+  tylko sytuacji, gdy ostatnia rezerwacja zwróciła 0 wierszy [decyzja projektanta,
   po recenzji]. Uzasadnienie: dobieranie wyłącznie w rytmie pollingu
   wydłuża cykl slotu o średnio ~0,25 s, co dla 3×20 daje ~950/min — poniżej
   docelowego 1000/min.
@@ -450,7 +450,7 @@ Duplikat w dowolnym stanie dostaje aktualny status.
   `--scale worker=N` nie kolidował o port [decyzja projektanta, po
   recenzji].
 - Skalowanie: `docker compose up --scale worker=N`; poprawność gwarantuje
-  atomowy claim w SQLite.
+  atomowa rezerwacja zdarzeń w SQLite.
 
 ### Symulacja przetwarzania
 
@@ -527,7 +527,7 @@ build SQLite).
     z wyłączeniem `/health`, `/ready` i `/metrics`
     (`OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`) — inaczej healthchecki i
     próbkowanie `/metrics` co 1 s zalewają ślady.
-  - Przy przyjęciu nowego zdarzenia bieżący kontekst zapisywany w kolumnie
+  - Przy zapisie nowego zdarzenia bieżący kontekst zapisywany w kolumnie
     `traceparent` (format W3C) [ustalone — obowiązkowe].
   - Worker przy każdej próbie odtwarza kontekst z `traceparent` i tworzy
     **jeden span `webhook.process` na próbę**, jako bezpośrednie dziecko
@@ -562,8 +562,8 @@ build SQLite).
     `/metrics` workera.
 - **Logi:** strukturalny JSON na **stdout** (spany z eksportera
   konsolowego idą na **stderr**, żeby nie mieszać strumieni), w każdym wpisie `trace_id`,
-  `span_id`, `idempotency_key`, `source`; zdarzenia: przyjęcie, duplikat,
-  claim, wynik próby, odzyskanie rezerwacji, retencja.
+  `span_id`, `idempotency_key`, `source`; zdarzenia: zapis, duplikat,
+  rezerwacja, wynik próby, odzyskanie rezerwacji, retencja.
 - **Eksport:** domyślnie konsola (span exporter na stderr) — działa bez
   infrastruktury [ustalone]. Ustawienie `OTEL_EXPORTER_OTLP_ENDPOINT`
   przełącza na OTLP — wymaga pakietu
@@ -664,8 +664,8 @@ w izolacji, żeby decyzje projektowe opierały się na liczbach.
 
 | # | Benchmark | Co mierzy | Uzasadnia |
 |---|---|---|---|
-| 1 | `synchronous=FULL` vs `NORMAL` | czas transakcji przyjęcia (INSERT) w obu trybach | decyzję o `FULL` (§7) |
-| 2 | claim przy rosnącej kolejce | czas pobrania porcji pracy przy 0 / 10 000 / 100 000 oczekujących | indeksy częściowe `ix_events_ready` / `ix_events_leased`; claim nie zwalnia przy burst i blisko `MAX_BACKLOG` |
+| 1 | `synchronous=FULL` vs `NORMAL` | czas transakcji zapisu zdarzenia (INSERT) w obu trybach | decyzję o `FULL` (§7) |
+| 2 | rezerwacja przy rosnącej kolejce | czas pobrania porcji pracy przy 0 / 10 000 / 100 000 oczekujących | indeksy częściowe `ix_events_ready` / `ix_events_leased`; rezerwacja nie zwalnia przy burst i blisko `MAX_BACKLOG` |
 | 3 | rywalizacja o zapis | przepustowość transakcji przy 1 / 2 / 4 / 8 procesach piszących | górną granicę skalowania workerów na SQLite; interpretację wyniku `scaling` (§13) |
 | 4 | retencja | czas usunięcia / wyczyszczenia porcji 1000 wierszy | rozmiar porcji retencji i czas blokady zapisu (§11) |
 
@@ -694,7 +694,7 @@ podlega linterowi (§15a) [ustalone].
 
 Narzędzie: pytest. Kluczowe obszary:
 
-- repozytorium: zapis nowego / duplikat (także z inną treścią); atomowy claim (dwóch
+- repozytorium: zapis nowego / duplikat (także z inną treścią); atomowa rezerwacja (dwóch
   konkurentów nie dostaje tego samego wiersza); warunkowy zapis wyniku po
   wygaśnięciu rezerwacji; odzyskiwanie rezerwacji; przejścia statusów i
   wyczerpanie prób;
@@ -703,7 +703,7 @@ Narzędzie: pytest. Kluczowe obszary:
 - worker: `fail_once`, `fail_always`, z krótkim czasem symulacji;
 - retencja: czyszczenie payloadu i usuwanie wierszy po progach;
 - propagacja `traceparent` (in-memory span exporter);
-- plany zapytań: `EXPLAIN QUERY PLAN` dla claimu, odzyskiwania, gauge'y i
+- plany zapytań: `EXPLAIN QUERY PLAN` dla rezerwacji, odzyskiwania, gauge'y i
   retencji — bez `SCAN` tabeli (§7);
 - dane testowe: **pięć przykładowych webhooków z treści zadania**
   (`evt-001`…`evt-005`) użytych dosłownie;
@@ -758,7 +758,7 @@ Narzędzie: pytest. Kluczowe obszary:
   - **`synchronous=FULL`** — dlaczego nie `NORMAL`, z pomiarem kosztu.
   - **Schemat** — uzasadnienia z §7: `id` obok klucza, czasy INTEGER ms,
     `STRICT`, scalenie terminów w `run_at`, dwa indeksy częściowe pod
-    zapytania, ogrodzenie numerem próby.
+    zapytania, kontrola numeru próby.
   - **SQLite współdzielony przez kilka kontenerów: ograniczenia**
     [ustalone].
 
@@ -794,7 +794,7 @@ Narzędzie: pytest. Kluczowe obszary:
       cicha utrata danych.
     - **Poprawność logiczna nie zależy od liczby kontenerów:** atomowe
       pobieranie pracy (`UPDATE … RETURNING` w `BEGIN IMMEDIATE`) i
-      warunkowy zapis wyniku (ogrodzenie numerem próby `attempts`).
+      warunkowy zapis wyniku (kontrola numeru próby `attempts`).
 
     Stan weryfikacji: recenzent zmierzył 3 procesy piszące w jednym
     kontenerze (WAL, `synchronous=FULL`, 600/600 wierszy, ~1300 tx/s).

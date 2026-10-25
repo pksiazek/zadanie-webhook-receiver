@@ -482,3 +482,13 @@ Następny krok: plan implementacji (`superpowers:writing-plans`).
   `worker/app.py` (+ `create_app` / `create_worker`).
 - **Decyzja: struktura zaakceptowana** (spec §16a, plan zaktualizowany).
   Użytkownik nadal przegląda dokumenty — implementacja nie rozpoczęta.
+
+## 26. Terminologia
+
+Uwaga użytkownika: kalki z angielskiego („przyjęcie”, „claim”, „ogrodzenie”,
+„limit ciała”) są niezrozumiałe. **Przyjęty słownik:** przyjęcie → zapis
+zdarzenia (dla API: przyjmowanie webhooków); claim → rezerwacja zdarzeń;
+lease → rezerwacja; ogrodzenie/fencing → kontrola numeru próby; token
+ogrodzenia → numer próby jako znacznik rezerwacji; ciało → body. Nazwy w
+kodzie bez zmian (`claim`, `CLAIM_SQL`). Zastosowane w dokumencie
+projektowym i planie; ten zapis zachowuje historyczne sformułowania.
