@@ -337,3 +337,18 @@ zostawić `409` (rekomendacja), dosłownie wg zadania, wariant pośredni
 z istniejącym statusem. Usunięte: `409`, `payload_hash`, kanonizacja,
 outcome `conflict`. Kompromis opisany w README; wykrywanie niezgodności
 treści → TODO. (Zastępuje decyzję z sekcji 4.)
+
+## 17. Monitoring — ile workerów działa?
+
+Pytanie użytkownika: więcej o monitoringu i metrykach, w szczególności jak
+sprawdzić, czy i ile workerów działa.
+
+Przedstawiono źródła (API `/metrics`, worker `/metrics` na 9100 tylko w
+sieci compose, Jaeger, logi, `/health`/`/ready`) i lukę: po usunięciu
+heartbeatów liczby workerów nie widać w żadnej metryce — tylko
+`docker compose ps` (healthcheck) i pośrednio
+`queue_depth{processing}` pod obciążeniem. Opcje: OTel Collector w compose
+(rekomendacja), przywrócenie heartbeatów, zostawić jak jest.
+
+**Decyzja: OpenTelemetry Collector jako rozszerzenie albo TODO — do
+decyzji w trakcie implementacji** (ostatnie, opcjonalne zadanie planu).

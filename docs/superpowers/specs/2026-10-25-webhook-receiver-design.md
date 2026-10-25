@@ -451,6 +451,22 @@ zapisu na długo.
   przełącza na OTLP. `docker compose` zawiera Jaeger all-in-one (UI
   `localhost:16686`), o ile to tanie; jeśli okaże się kosztowne — zostaje
   konsola, a Jaeger trafia do TODO [ustalone].
+- **Ile workerów działa:**
+  - Bazowo: `docker compose ps` — liczba kontenerów workera w stanie
+    `healthy` (healthcheck na ich `/health`); pośrednio pod obciążeniem
+    `webhook_queue_depth{status="processing"}` ≈ liczba workerów × 20.
+    Ograniczenie: liczby workerów nie widać w żadnej metryce, a metryki
+    workerów (port 9100) nie są zbierane centralnie.
+  - **Rozszerzenie opcjonalne — OpenTelemetry Collector w compose**
+    [ustalone: rozszerzenie albo TODO, **decyzja w trakcie
+    implementacji**]: API i workery wysyłają metryki (i ślady) przez OTLP do
+    Collectora, który wystawia jeden zbiorczy endpoint Prometheus i
+    przekazuje ślady do Jaegera; każdy worker raportuje gauge
+    `webhook_worker_up` z `service.instance.id`, więc liczba workerów =
+    liczba serii. Realizowane jako ostatnie, opcjonalne zadanie planu —
+    jeśli zostanie pominięte, trafia do TODO.
+  - README opisuje, jak sprawdzić liczbę workerów w wariancie, który
+    zostanie zrealizowany.
 
 ## 13. Test obciążeniowy
 
