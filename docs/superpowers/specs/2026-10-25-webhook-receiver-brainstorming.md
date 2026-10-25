@@ -425,3 +425,40 @@ stabilny od roku, z nowszą bazą Debiana (trixie).
 
 **Decyzja: Python 3.14 (Debian trixie) w devcontainerze, obrazie i CI;
 minimum SQLite 3.37 sprawdzane przy starcie.**
+
+## 23. Finalne review (Fable, effort high)
+
+Recenzent (świeży subagent, tylko odczyt) zweryfikował kilka twierdzeń
+empirycznie (SQLite 3.40.1, FastAPI/Starlette). Ocena: dokument spójny z
+ostatnimi decyzjami; znalezione błędy techniczne:
+
+- **A1 (wysokie):** indeks częściowy `ix_events_due` nie był używany —
+  SQLite wymaga dosłownej zgodności warunku zapytania z warunkiem indeksu;
+  claim i odzyskiwanie robiły pełny skan. Błąd projektanta (wcześniejsza
+  weryfikacja dotyczyła innej postaci zapytania). Poprawka: dwa indeksy
+  pod zapytania (`ix_events_ready (run_at, status)` dla
+  `pending`/`retrying`, `ix_events_leased (run_at)` dla `processing`),
+  zweryfikowane `EXPLAIN QUERY PLAN` dla claimu, odzyskiwania, gauge'y i
+  retencji; obowiązkowy test planów zapytań.
+- **A2:** klucz z `/` w `GET` wymaga `{idempotency_key:path}`; `quote(key,
+  safe="")`; klucze `.`/`..` nieosiągalne (do TODO o formacie).
+- **A3:** dobieranie pracy tylko co `POLL_INTERVAL` dałoby ~950/min dla
+  3×20; poprawka: dobieranie po zwolnieniu slotu; faza schodzenia w
+  `steady`.
+- Średnie/niskie: pułapki `sqlite3` (DEFERRED, `RETURNING` przed
+  `COMMIT`, pragmy per połączenie, połączenie per wątek), Jaeger stały w
+  compose, definicje gauge'y, kolejność kontroli w `POST`, orkiestracja
+  `scaling` skryptem na hoście, szczegóły Dockera (exec, nie-root,
+  healthcheck bez curl, `deploy.replicas`), tag devcontainera, przykład
+  `GET`, przenośne usuwanie porcjami, wykluczenia OTel, middleware `413`,
+  TTL limitera, walidacja `LEASE_SECONDS`, `EMBEDDED_WORKER`, zakres
+  pokrycia; luki względem zadania: przykłady `evt-001…005`, restart API,
+  diagnostyka operatora.
+
+Decyzje użytkownika (rekomendacje projektanta przyjęte):
+- **Duplikat przy przekroczonym progu zaległości dostaje `200` ze
+  statusem, nie `503`.**
+- **Odzyskana rezerwacja przechodzi w `retrying`** (`run_at = now`,
+  `last_error = "lease expired"`), nie w `pending`.
+
+**Decyzja: wprowadzić wszystkie poprawki zgodnie z rekomendacją.**

@@ -62,14 +62,15 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 ## 3. Ograniczenia
 
 - **Python 3.14** [ustalone] — w devcontainerze, obrazie Dockera i CI; baza
-  obrazów Debian trixie (devcontainer `python:…-3.14-trixie`, Docker
-  `python:3.14-slim`). 3.15 odrzucony jako zbyt świeży (wydany ~2 tyg.
+  obrazów Debian trixie (devcontainer
+  `mcr.microsoft.com/devcontainers/python:3.14-trixie` — tag `1-3.14-trixie`
+  nie istnieje; Docker `python:3.14-slim`, który jest oparty na trixie). 3.15 odrzucony jako zbyt świeży (wydany ~2 tyg.
   temu — ryzyko braku gotowych wheeli zależności). Zmiana obrazu
   devcontainera razem z dodaniem docker-in-docker (jedna przebudowa).
 - FastAPI [ustalone], SQLite [wymóg zadania]. **Minimalna wersja biblioteki
   SQLite: 3.37** (`RETURNING` od 3.35, `STRICT` od 3.37) [ustalone];
-  Python używa systemowej `libsqlite3` obrazu (bookworm: 3.40.1 —
-  zweryfikowane; trixie: ~3.46 — do potwierdzenia przy implementacji).
+  Python używa systemowej `libsqlite3` obrazu (bookworm: 3.40.1, trixie:
+  3.46.1 — obie zweryfikowane).
   Każdy proces sprawdza `sqlite3.sqlite_version` przy starcie i kończy się
   czytelnym błędem poniżej minimum. Najnowszego SQLite (3.54.1) nie
   dołączamy — wymagałoby kompilacji lub osobnej paczki, a nie daje
@@ -103,6 +104,11 @@ Gwarantujemy [ustalone — do opisania w README]:
   token ogrodzenia, patrz §8), więc spóźniony worker z wygasłą rezerwacją
   nie nadpisze wyniku. Prawdziwy efekt uboczny musiałby
   być idempotentny względem klucza — to opisujemy jako założenie.
+- **Restart lub awaria API między `COMMIT` a wysłaniem `202`:** klient nie
+  dostaje odpowiedzi i ponawia; ponowienie trafia na istniejący klucz i
+  dostaje `200` z aktualnym statusem — zdarzenie nie ginie i nie jest
+  przetwarzane dwa razy. Awaria przed `COMMIT` = brak zapisu, ponowienie
+  zapisuje zdarzenie jako nowe.
 
 ## 5. Wybrane podejście
 
@@ -123,7 +129,8 @@ przyjęcie.
 Dodatkowo [decyzja projektanta]: przełącznik konfiguracyjny
 `EMBEDDED_WORKER=true` uruchamiający worker w procesie API — wyłącznie dla
 wygody lokalnego developmentu i testów; tryb domyślny i docker compose to
-osobne procesy.
+osobne procesy. W tym trybie nie startuje pomocniczy serwer workera (9100),
+a metryki workera trafiają na `/metrics` API.
 
 ### Architektura
 
@@ -161,12 +168,23 @@ Ciało:
 
 Walidacja: `idempotency_key` — dowolny niepusty string, maks. 255 znaków,
 bez ograniczenia zestawu znaków [ustalone]. W ścieżce `GET` klucz jest
-kodowany procentowo (RFC 3986, np. `evt/1` → `evt%2F1`); serwer dekoduje
-całą ścieżkę po `/webhooks/` (łącznie z `/`), a `Location` i `status_url`
-zwracane są już zakodowane, więc klient może ich użyć wprost.
+kodowany procentowo (RFC 3986, np. `evt/1` → `evt%2F1`). Uvicorn/Starlette
+dekodują procenty **przed** routingiem, więc `evt%2F1` trafia do routera
+jako `evt/1` — trasa musi używać konwertera ścieżki:
+`@app.get("/webhooks/{idempotency_key:path}")` (domyślny parametr nie
+dopasowuje `/` i daje `404`). Pusty klucz (`GET /webhooks/`) → `404`.
+`Location` i `status_url` (względne, np. `/webhooks/evt%2F1`) budowane
+przez `urllib.parse.quote(key, safe="")`, więc klient może ich użyć
+wprost. Ograniczenie (do README i punktu TODO o formacie klucza): kluczy
+`.` i `..` nie da się odpytać przez ścieżkę, bo klienci HTTP i proxy
+normalizują takie segmenty. Klucze ze znakami sterującymi są dozwolone —
+w logach JSON są escapowane przez serializator.
 `X-Source` — niepusty string, maks. 64 znaki;
 `event_type` — niepusty string; `payload` — obiekt JSON. Limit rozmiaru
-ciała: 256 KiB → `413` [decyzja projektanta]. Błędy walidacji → `422`.
+ciała: 256 KiB → `413` [decyzja projektanta] — wymaga własnego middleware
+(Starlette/uvicorn nie limitują ciała): sprawdzenie `Content-Length` oraz
+liczenie bajtów przy czytaniu strumienia (żądania chunked). Błędy
+walidacji → `422`.
 
 Odpowiedzi:
 
@@ -177,6 +195,15 @@ Odpowiedzi:
 | brak `X-Source` | `400` | opis błędu |
 | przekroczony limit nadawcy | `429` + `Retry-After` [ustalone] | opis |
 | przekroczony próg zaległości (backpressure) | `503` + `Retry-After` [decyzja projektanta] | opis |
+
+**Kolejność kontroli w `POST`** [decyzja projektanta, po recenzji]:
+`X-Source` (`400`) → rozmiar (`413`) → walidacja ciała (`422`) → rate
+limit (`429`; duplikaty też się liczą) → backpressure → zapis. Przy
+przekroczonym progu zaległości serwis najpierw sprawdza, czy klucz już
+istnieje: **duplikat dostaje `200` z aktualnym statusem, a nie `503`**
+[ustalone] — nie dodaje pracy, a nadawca w pętli ponowień nie pogłębia
+zalewu. `503` dostają tylko nowe zdarzenia. `Retry-After` dla `503`:
+stała konfigurowalna (domyślnie 5 s) [decyzja projektanta].
 
 **Duplikat = ten sam `idempotency_key`, niezależnie od treści** [ustalone —
 dosłownie wg zadania]. Treść ponowienia nie jest porównywana; zwracany jest
@@ -204,7 +231,7 @@ Nie wymaga `X-Source` (klucz jest globalny). Zwraca:
   "source": "shop",
   "event_type": "order.created",
   "status": "retrying",
-  "attempts": 2,
+  "attempts": 1,
   "max_attempts": 5,
   "next_attempt_at": "2026-10-25T10:00:08Z",
   "last_error": "simulated failure (fail_once)",
@@ -234,8 +261,8 @@ payload_json IS NULL`. Nieznany klucz → `404`.
   [ustalone — wymaga jawnego opisu w README, patrz §15].
 - `GET /metrics` — metryki w formacie Prometheus (eksporter OpenTelemetry),
   **w tym gauge'e kolejki** (`webhook_queue_depth{status}`,
-  `webhook_queue_oldest_pending_age_seconds`) liczone z tego samego cache
-  co backpressure. To jedno miejsce, z którego
+  `webhook_queue_oldest_pending_age_seconds`, definicje w §12) liczone z
+  tego samego cache co backpressure. To jedno miejsce, z którego
   dyżurny i test obciążeniowy czytają stan kolejki, niezależnie od liczby
   workerów [decyzja projektanta, po recenzji].
 
@@ -261,9 +288,12 @@ CREATE TABLE webhook_events (
     finished_at      INTEGER                      -- ms; completed/failed
 ) STRICT;
 
--- pobieranie pracy i odzyskiwanie wygasłych rezerwacji — jeden indeks
-CREATE INDEX ix_events_due ON webhook_events (run_at)
-    WHERE status IN ('pending', 'retrying', 'processing');
+-- pobieranie pracy, licznik zaległości, wiek najstarszego należnego
+CREATE INDEX ix_events_ready ON webhook_events (run_at, status)
+    WHERE status IN ('pending', 'retrying');
+-- odzyskiwanie wygasłych rezerwacji, licznik processing
+CREATE INDEX ix_events_leased ON webhook_events (run_at)
+    WHERE status = 'processing';
 -- retencja
 CREATE INDEX ix_events_finished ON webhook_events (status, finished_at)
     WHERE finished_at IS NOT NULL;
@@ -292,15 +322,27 @@ Uzasadnienia (do README):
   `STRICT` (≥ 3.37) wymusza deklarowane typy.
 - **`run_at` zamiast osobnych terminów** (wzorzec „visibility timeout”, jak
   w SQS): dla `pending`/`retrying` to moment, od którego wolno podjąć; dla
-  `processing` — moment wygaśnięcia rezerwacji. Jedna kolumna i jeden
-  indeks obsługują i pobieranie pracy, i odzyskiwanie.
+  `processing` — moment wygaśnięcia rezerwacji. Jedna kolumna zamiast
+  dwóch.
+- **Dwa indeksy częściowe, dokładnie pod zapytania.** SQLite używa indeksu
+  częściowego tylko wtedy, gdy warunek zapytania zawiera **dosłownie**
+  warunek indeksu („SQLite does not do algebra”). Dlatego
+  `ix_events_ready` ma warunek `status IN ('pending','retrying')`
+  identyczny z claimem i gauge'ami, a `ix_events_leased` — `status =
+  'processing'` identyczny z odzyskiwaniem. Kolumna `status` w
+  `ix_events_ready` czyni indeks pokrywającym dla licznika per status.
+  Zweryfikowane `EXPLAIN QUERY PLAN` (claim, odzyskiwanie, gauge'e,
+  retencja — bez `SCAN` tabeli). **Wymóg:** test jednostkowy asertujący
+  plan zapytania dla każdego z tych zapytań, żeby regresja nie została
+  niezauważona do benchmarku nr 2.
 - **Bez `lease_owner`** — ogrodzenie zapewnia numer próby (§8).
 - Usunięte jako zbędne: `max_attempts` (wartość globalna z konfiguracji),
   `updated_at` (żadna logika jej nie używa; historię pokazują logi i
   ślady), `payload_purged_at` (wynika z `payload_json IS NULL`), tabela
   heartbeatów workerów (patrz §6 `/ready`).
-- Status `retrying` (formalnie „`pending` z `attempts > 0`”) zostaje —
-  daje operatorowi czytelny podział kolejki w metrykach.
+- Status `retrying` (= „czeka na podjęcie, `attempts > 0`” — także po
+  odzyskaniu wygasłej rezerwacji, patrz §8) zostaje — daje operatorowi
+  czytelny podział kolejki w metrykach.
 
 Ustawienia połączenia: `journal_mode=WAL`, `busy_timeout=5000` oraz **`synchronous=FULL`** [ustalone — decyzja
 zapisywana w README w sekcji tradeoffów]. Uzasadnienie: `202` jest
@@ -313,16 +355,40 @@ potrzebnych ~17 INSERT/s + porównywalnej liczby UPDATE — pomijalny;
 potwierdzamy w teście obciążeniowym. Transakcje zapisujące otwierane
 `BEGIN IMMEDIATE`, żeby uniknąć zakleszczeń przy podnoszeniu blokady.
 
+**Pułapki modułu `sqlite3`** (dotyczą każdego modułu z bazą) [decyzja
+projektanta, po recenzji]:
+
+- `sqlite3.connect(autocommit=False)` (Python ≥ 3.12) wystawia zwykły
+  `BEGIN` (DEFERRED). Transakcja „czytaj, potem pisz” kończy się wtedy
+  przy konkurencji błędem `SQLITE_BUSY_SNAPSHOT`, którego `busy_timeout`
+  nie obsługuje. **Wymóg:** `autocommit=True` + jawne `BEGIN IMMEDIATE` /
+  `COMMIT` / `ROLLBACK` w jednym pomocniku transakcji.
+- Wiersze z `UPDATE … RETURNING` pobieramy (`fetchall()`) **przed**
+  `COMMIT` — inaczej `cannot commit transaction - SQL statements in
+  progress`.
+- `synchronous` i `busy_timeout` są **per połączenie** — ustawiane przy
+  każdym `connect` w API i workerze. `journal_mode=WAL` jest trwały w
+  pliku, ale przy równoczesnym starcie kilku procesów na świeżym
+  wolumenie przełączenie może się nie udać — sprawdzamy zwrot pragmy i
+  ponawiamy.
+- Połączenie **per wątek** (`threading.local`): endpointy FastAPI `def`
+  działają w puli wątków, a worker wykonuje operacje bazy przez
+  `asyncio.to_thread`. Bez współdzielenia połączeń między wątkami (bez
+  `check_same_thread=False`).
+
 Migracje: idempotentny skrypt `CREATE … IF NOT EXISTS` wykonywany przy
-starcie każdego procesu [decyzja projektanta]; narzędzie migracji → TODO.
+starcie każdego procesu, w `BEGIN IMMEDIATE` z `busy_timeout` (kilka
+procesów startuje równocześnie) [decyzja projektanta]; narzędzie migracji
+→ TODO.
 
 ## 8. Cykl życia zdarzenia (statusy)
 
 ```
  POST (nowy klucz) ──► pending ──claim──► processing ──sukces──► completed
-                          ▲                   │ │
-       lease wygasła,     │                   │ └─błąd, próby < max──► retrying ──(run_at)──claim──► processing
-       próby < max ───────┘                   │
+                                              │ │
+                                              │ ├─błąd, próby < max──────────► retrying ──(run_at)──claim──► processing
+                                              │ └─lease wygasła, próby < max─► retrying
+                                              │
                                               └─błąd lub lease wygasła, próby = max──► failed
 ```
 
@@ -333,7 +399,7 @@ starcie każdego procesu [decyzja projektanta]; narzędzie migracji → TODO.
 | `processing` → `completed` | symulacja zakończona sukcesem; `UPDATE … WHERE id = ? AND status = 'processing' AND attempts = ?` (numer próby z claimu) zapisuje wynik, status i `finished_at` w jednej instrukcji |
 | `processing` → `retrying` | symulacja rzuciła błąd i `attempts < MAX_ATTEMPTS`; ten sam warunek ogrodzenia; `run_at = now + backoff(attempts)`; `last_error` zapisany |
 | `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; ten sam warunek ogrodzenia; stan końcowy, `finished_at` ustawione |
-| `processing` → `pending` | rezerwacja wygasła (`status = 'processing' AND run_at <= now` — worker padł / restart) i `attempts < MAX_ATTEMPTS`; osobna instrukcja wykonywana przez worker przed claimem (liczy `webhook_lease_recoveries_total`) |
+| `processing` → `retrying` (odzyskanie) | rezerwacja wygasła (`status = 'processing' AND run_at <= now` — worker padł / restart) i `attempts < MAX_ATTEMPTS`; `run_at = now`, `last_error = "lease expired"`; osobna instrukcja wykonywana przez worker przed claimem (liczy `webhook_lease_recoveries_total`) [ustalone] |
 | `processing` → `failed` (wygasła) | rezerwacja wygasła przy `attempts = MAX_ATTEMPTS`; `last_error = "lease expired"`, `finished_at` ustawione |
 
 **Ogrodzenie (fencing) przez numer próby.** Każdy claim zwiększa
@@ -344,7 +410,9 @@ Identyfikator workera trafia do logów, spanów i `result_json`, nie do
 schematu.
 
 Parametry domyślne (konfigurowalne) [decyzja projektanta]:
-`MAX_ATTEMPTS=5`, `LEASE_SECONDS=30` (> maks. czasu symulacji 5 s),
+`MAX_ATTEMPTS=5`, `LEASE_SECONDS=30` (> maks. czasu symulacji 5 s;
+konfiguracja jest walidowana przy starcie: `LEASE_SECONDS >
+SIMULATED_MAX_SECONDS`, inaczej fałszywe „lease expired”),
 backoff `min(BACKOFF_BASE · 2^(attempts−1), BACKOFF_MAX)` z jitterem ±20%,
 `BACKOFF_BASE=2 s`, `BACKOFF_MAX=60 s`. Baza i limit backoffu są
 konfigurowalne, żeby testy i demo `fail_always` nie trwały ~50 s.
@@ -358,8 +426,13 @@ Duplikat w dowolnym stanie dostaje aktualny status.
   20. Domyślna konfiguracja compose: **3 workery × 20 slotów** = 60
   slotów, co przy 17 zdarzeniach/s × średnio 3,5 s ≈ 60 pokrywa docelowy
   ruch i od razu demonstruje skalowanie poziome [ustalone].
-- Pobiera pracę porcjami (tyle, ile wolnych slotów); gdy brak pracy — śpi
-  `POLL_INTERVAL` (0,5 s); gdy pracy jest dużo — dobiera od razu.
+- **Dobiera pracę natychmiast po zwolnieniu dowolnego slotu**
+  (`asyncio.wait(..., return_when=FIRST_COMPLETED)` lub semafor + sygnał),
+  porcją równą liczbie wolnych slotów. `POLL_INTERVAL` (0,5 s) dotyczy
+  tylko sytuacji, gdy ostatni claim zwrócił 0 wierszy [decyzja projektanta,
+  po recenzji]. Uzasadnienie: dobieranie wyłącznie w rytmie pollingu
+  wydłuża cykl slotu o średnio ~0,25 s, co dla 3×20 daje ~950/min — poniżej
+  docelowego 1000/min.
 - Operacje SQLite wykonywane poza pętlą zdarzeń (`asyncio.to_thread` lub
   dedykowany wątek) [dla wykonawcy].
 - Graceful shutdown (SIGTERM): przestaje pobierać, czeka na trwające zadania
@@ -371,7 +444,9 @@ Duplikat w dowolnym stanie dostaje aktualny status.
   idempotentna, więc to bezpieczne.
 - Pomocniczy serwer HTTP na `WORKER_METRICS_PORT` (domyślnie 9100) z
   `/metrics` (metryki procesu workera: czasy przetwarzania, wyniki prób) i
-  `/health` (używany przez healthcheck Dockera) — dostępny w sieci compose, **niepublikowany na hoście**, żeby
+  `/health` (używany przez healthcheck Dockera; samo
+  `prometheus_client.start_http_server` obsługuje tylko `/metrics`, więc
+  potrzebny mały własny serwer) — dostępny w sieci compose, **niepublikowany na hoście**, żeby
   `--scale worker=N` nie kolidował o port [decyzja projektanta, po
   recenzji].
 - Skalowanie: `docker compose up --scale worker=N`; poprawność gwarantuje
@@ -398,10 +473,12 @@ Na potrzeby testów: czas symulacji konfigurowalny
   API; domyślnie 50 żądań/s, burst 100 na źródło [decyzja projektanta —
   wartości powyżej oczekiwanego ruchu, żeby test 1000/min z kilku źródeł nie
   był dławiony]; przekroczenie → `429` + `Retry-After`. Ograniczenie: limit
-  per instancja API; współdzielony limit (Redis) → TODO.
+  per instancja API; współdzielony limit (Redis) → TODO. Słownik kubełków
+  per `X-Source` ograniczony (TTL/LRU), żeby dowolne wartości nagłówka nie
+  powiększały pamięci bez końca.
 - **Backpressure na zaległości** [decyzja projektanta]: jeśli liczba wierszy
   `pending`+`retrying` przekracza `MAX_BACKLOG` (domyślnie 100 000) → `503` +
-  `Retry-After`. Licznik odświeżany co ~1 s (cache), nie liczony przy każdym
+  `Retry-After` (tylko dla nowych zdarzeń — duplikaty dostają `200`, §6). Licznik odświeżany co ~1 s (cache), nie liczony przy każdym
   żądaniu. Próg jest daleko powyżej scenariusza testu „burst”, więc nie
   zakłóca demonstracji kolejkowania.
 - `GET` statusu nie podlega limitowi zapisu [dla wykonawcy: może mieć własny,
@@ -437,14 +514,19 @@ Payload trzymamy krócej, bo może zawierać dane osobowe (e-mail, imię i
 nazwisko w przykładach).
 
 Usuwanie porcjami (np. po 1000 wierszy na transakcję), żeby nie blokować
-zapisu na długo.
+zapisu na długo — przenośnie przez `WHERE id IN (SELECT id … LIMIT 1000)`
+(`DELETE/UPDATE … LIMIT` wymaga opcji kompilacji, której nie ma każdy
+build SQLite).
 
 ## 12. Obserwowalność
 
 **OpenTelemetry jako główny mechanizm** [ustalone].
 
 - **Traces:**
-  - `opentelemetry-instrumentation-fastapi` — span dla każdego żądania.
+  - `opentelemetry-instrumentation-fastapi` — span dla każdego żądania,
+    z wyłączeniem `/health`, `/ready` i `/metrics`
+    (`OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`) — inaczej healthchecki i
+    próbkowanie `/metrics` co 1 s zalewają ślady.
   - Przy przyjęciu nowego zdarzenia bieżący kontekst zapisywany w kolumnie
     `traceparent` (format W3C) [ustalone — obowiązkowe].
   - Worker przy każdej próbie odtwarza kontekst z `traceparent` i tworzy
@@ -458,9 +540,18 @@ zapisu na długo.
   - `webhooks_received_total{source, outcome=accepted|duplicate|rate_limited|backpressure|invalid}`
   - `webhook_processing_duration_seconds` (histogram), `{outcome}`
   - `webhook_attempts_total{outcome=success|retry|failed}`
-  - `webhook_queue_depth{status}` (gauge odczytywany z bazy)
-  - `webhook_queue_oldest_pending_age_seconds` (gauge — najważniejszy sygnał
-    „kolejka nie nadąża”)
+  - `webhook_queue_depth{status}` — gauge tylko dla `pending`, `retrying`,
+    `processing` (liczenie stanów końcowych skanowałoby całą tabelę);
+    zapytania zgodne z indeksami z §7.
+  - `webhook_queue_oldest_pending_age_seconds` — `now − MIN(run_at)` dla
+    pracy **należnej i niepodjętej**: wiersze `pending`/`retrying` z
+    `run_at <= now` oraz `processing` z wygasłą rezerwacją (`run_at <=
+    now`); 0, gdy takich nie ma. Z działającymi workerami ≈
+    `POLL_INTERVAL`; bez workerów rośnie liniowo — najważniejszy sygnał
+    „nikt nie przetwarza / kolejka nie nadąża”. Liczenie od `run_at`, a
+    nie `created_at`, żeby backoff nie dawał fałszywych alarmów.
+  - Callbacki gauge'y (`ObservableGauge`) czytają wyłącznie cache
+    odświeżany co ~1 s — nie wykonują zapytań w wątku scrape'u.
   - `webhook_lease_recoveries_total`
   - Uwaga implementacyjna: eksporter Prometheus z OTel sam dokleja `_total`
     do liczników i jednostkę do histogramów — instrumenty nazywamy bez
@@ -469,14 +560,19 @@ zapisu na długo.
     instrumentacji (`0.xxbN`) przypięte do pasującej wersji SDK.
   - Gauge'e kolejki na `/metrics` API (patrz §6), metryki przetwarzania na
     `/metrics` workera.
-- **Logi:** strukturalny JSON na stdout, w każdym wpisie `trace_id`,
+- **Logi:** strukturalny JSON na **stdout** (spany z eksportera
+  konsolowego idą na **stderr**, żeby nie mieszać strumieni), w każdym wpisie `trace_id`,
   `span_id`, `idempotency_key`, `source`; zdarzenia: przyjęcie, duplikat,
   claim, wynik próby, odzyskanie rezerwacji, retencja.
-- **Eksport:** domyślnie konsola (span exporter do stdout) — działa bez
+- **Eksport:** domyślnie konsola (span exporter na stderr) — działa bez
   infrastruktury [ustalone]. Ustawienie `OTEL_EXPORTER_OTLP_ENDPOINT`
-  przełącza na OTLP. `docker compose` zawiera Jaeger all-in-one (UI
-  `localhost:16686`), o ile to tanie; jeśli okaże się kosztowne — zostaje
-  konsola, a Jaeger trafia do TODO [ustalone].
+  przełącza na OTLP — wymaga pakietu
+  `opentelemetry-exporter-otlp-proto-http` i kodu wybierającego exporter
+  na podstawie zmiennej. **`docker compose` zawiera Jaeger all-in-one** (UI
+  `localhost:16686`) jako stały element — wymagany przez test
+  obciążeniowy (§13) [ustalone; wcześniejszy warunek „o ile tanie”
+  zniesiony po recenzji — to ~10 linii compose]. Wariant awaryjny pomiaru
+  bez Jaegera: `OTEL_TRACES_EXPORTER=none`.
 - **Ile workerów działa:**
   - Bazowo: `docker compose ps` — liczba kontenerów workera w stanie
     `healthy` (healthcheck na ich `/health`); pośrednio pod obciążeniem
@@ -517,10 +613,12 @@ stdout zawyża p99 [ustalone].
 Oczekiwana przepustowość przetwarzania: 1 worker × 20 slotów / 3,5 s ≈
 5,7/s ≈ 340/min; 3 workery ≈ 17/s ≈ 1030/min.
 
-**Scenariusz `steady`** [ustalone]: 1000/min przez 3 min.
+**Scenariusz `steady`** [ustalone]: 1000/min przez 3 min, potem faza
+schodzenia kolejki do 0 (limit 2 min) przed weryfikacją kompletności.
 Kryteria: p99 opóźnienia `POST` < 100 ms, zero odpowiedzi innych niż 2xx.
-Uwaga: przy 3×20 przetwarzanie ma tylko ~3% zapasu nad 1000/min, więc
-kolejka może się lekko wahać — kryteria dotyczą przyjmowania.
+Uwaga: przy 3×20 przetwarzanie ma tylko ~3% zapasu nad 1000/min (przy
+dobieraniu pracy natychmiast po zwolnieniu slotu, §9), więc kolejka może
+się lekko wahać — kryteria dotyczą przyjmowania.
 
 **Scenariusz `burst`** [ustalone]:
 
@@ -535,8 +633,13 @@ kolejka może się lekko wahać — kryteria dotyczą przyjmowania.
 przebieg na 3×20 pokazuje tylko, że ta konfiguracja wystarcza):
 
 - dla N = 1, 2, 3 workerów (po 20 slotów), każdy przebieg na czystej bazie;
-- zalanie kolejki nadmiarem pracy (3000 zdarzeń wysłanych szybko, bez
-  dalszego napływu), następnie pomiar przez 2 min tempa kończenia zdarzeń
+- orkiestracja: **skrypt po stronie hosta** (`scripts/scaling.sh`), który
+  dla każdego N robi `docker compose down -v`, `up --scale worker=N` i
+  uruchamia kontener generatora (profil `loadtest`); sam kontener nie ma
+  dostępu do demona Dockera (celowo) [decyzja projektanta, po recenzji];
+- zalanie kolejki nadmiarem pracy (3000 zdarzeń wysłanych tempem 200/s z 5
+  źródeł — 40/s na źródło, poniżej limitu 50/s; generator ponawia `429`,
+  żeby żadne zdarzenie nie przepadło), następnie pomiar przez 2 min tempa kończenia zdarzeń
   (spadek `pending`+`retrying`+`processing` na minutę), z pominięciem
   krótkiej rozgrzewki;
 - oczekiwane ≈ 340 / 690 / 1030 zdarzeń/min;
@@ -562,7 +665,7 @@ w izolacji, żeby decyzje projektowe opierały się na liczbach.
 | # | Benchmark | Co mierzy | Uzasadnia |
 |---|---|---|---|
 | 1 | `synchronous=FULL` vs `NORMAL` | czas transakcji przyjęcia (INSERT) w obu trybach | decyzję o `FULL` (§7) |
-| 2 | claim przy rosnącej kolejce | czas pobrania porcji pracy przy 0 / 10 000 / 100 000 oczekujących | indeks częściowy `ix_events_due`; claim nie zwalnia przy burst i blisko `MAX_BACKLOG` |
+| 2 | claim przy rosnącej kolejce | czas pobrania porcji pracy przy 0 / 10 000 / 100 000 oczekujących | indeksy częściowe `ix_events_ready` / `ix_events_leased`; claim nie zwalnia przy burst i blisko `MAX_BACKLOG` |
 | 3 | rywalizacja o zapis | przepustowość transakcji przy 1 / 2 / 4 / 8 procesach piszących | górną granicę skalowania workerów na SQLite; interpretację wyniku `scaling` (§13) |
 | 4 | retencja | czas usunięcia / wyczyszczenia porcji 1000 wierszy | rozmiar porcji retencji i czas blokady zapisu (§11) |
 
@@ -585,7 +688,9 @@ podlega linterowi (§15a) [ustalone].
   worker + prawdziwy SQLite, scenariusz restartu).
 - **Zielone testy są warunkiem ukończenia każdego zadania** w planie i
   blokują CI.
-- **Próg pokrycia 85%** (`pytest-cov`, `fail_under = 85`) egzekwowany w CI.
+- **Próg pokrycia 85%** (`pytest-cov`, `fail_under = 85`) egzekwowany w CI,
+  liczony **tylko dla pakietu aplikacji** (`--cov=<pakiet>`), bez
+  `benchmarks/` i skryptu obciążeniowego.
 
 Narzędzie: pytest. Kluczowe obszary:
 
@@ -598,6 +703,13 @@ Narzędzie: pytest. Kluczowe obszary:
 - worker: `fail_once`, `fail_always`, z krótkim czasem symulacji;
 - retencja: czyszczenie payloadu i usuwanie wierszy po progach;
 - propagacja `traceparent` (in-memory span exporter);
+- plany zapytań: `EXPLAIN QUERY PLAN` dla claimu, odzyskiwania, gauge'y i
+  retencji — bez `SCAN` tabeli (§7);
+- dane testowe: **pięć przykładowych webhooków z treści zadania**
+  (`evt-001`…`evt-005`) użytych dosłownie;
+- duplikat przy przekroczonym progu zaległości dostaje `200`, nowe
+  zdarzenie `503` (§6);
+- `GET` kluczy z `/`, `%`, `?`, `#` i znakami UTF-8 (§6);
 - test „restartu”: zdarzenie w `processing` z wygasłą rezerwacją zostaje
   dokończone przez nowy worker.
 
@@ -606,11 +718,20 @@ Narzędzie: pytest. Kluczowe obszary:
 - Kod (pakiet Pythona, `pyproject.toml`, konfiguracja ruff — §15a).
 - `.github/workflows/ci.yml` — lint, testy, build obrazu (§15a).
 - `benchmarks/` — cztery benchmarki z §13a.
-- `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`).
-- `docker-compose.yml`: `api`, `worker`, `jaeger`; nazwany wolumen z plikiem
-  bazy; healthcheck API na `/ready`; healthcheck workera na jego `/health`
-  (port 9100 w sieci compose); `stop_grace_period: 20s` dla workera.
-- Zmiana devcontainera: feature `docker-in-docker`.
+- `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`):
+  `CMD`/`ENTRYPOINT` w formie exec (skrypt wejściowy kończy się `exec`),
+  żeby proces dostawał SIGTERM; użytkownik inny niż root; katalog bazy
+  tworzony w obrazie z właścicielem tego użytkownika (Docker kopiuje
+  właściciela do pustego nazwanego wolumenu przy pierwszym montowaniu).
+- `docker-compose.yml`: `api`, `worker` (`deploy.replicas: 3`, nadpisywane
+  przez `--scale`), `jaeger`; nazwany wolumen z plikiem bazy; healthcheck
+  API na `/ready`; healthcheck workera na jego `/health` (port 9100 w sieci
+  compose); healthchecki przez `python -c "urllib.request…"` (obraz
+  `python:3.14-slim` nie ma `curl` ani `wget`); `stop_grace_period: 20s`
+  dla workera.
+- `scripts/scaling.sh` — orkiestracja scenariusza `scaling` (§13).
+- Zmiana devcontainera: obraz `mcr.microsoft.com/devcontainers/python:3.14-trixie`
+  i feature `docker-in-docker` (jedna przebudowa).
 - **Przenośność Dockera** [ustalone]: `Dockerfile` i `docker-compose.yml`
   nie mogą zależeć od devcontainera — mają działać na dowolnym hoście z
   Docker Engine i Compose v2 (Linux, macOS z Docker Desktop/OrbStack,
@@ -622,7 +743,10 @@ Narzędzie: pytest. Kluczowe obszary:
   hoście. README zawiera instrukcję dla „gołego” hosta z Dockerem;
   `docker build` w CI weryfikuje budowanie poza devcontainerem.
 - README: architektura, gwarancje (§4), tradeoffy, uruchomienie (lokalnie i
-  w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego i benchmarków,
+  w Dockerze), przykładowe wywołania `curl` na **pięciu przykładowych
+  webhookach z treści zadania** (`evt-001`…`evt-005`, dosłownie;
+  `payload.simulate` jako dodatek), przykładowe zapytania `sqlite3` dla
+  operatora (lista `failed`, zaległe), wyniki testu obciążeniowego i benchmarków,
   założenia skalowalności, sekcja **TODO**. Sekcja tradeoffów musi jawnie
   opisywać co najmniej [ustalone]:
   - **Readiness API niezależne od workera** — co oznacza dla operatora
@@ -633,7 +757,8 @@ Narzędzie: pytest. Kluczowe obszary:
     od martwego — brak tabeli heartbeatów) i dlaczego tak wybrano.
   - **`synchronous=FULL`** — dlaczego nie `NORMAL`, z pomiarem kosztu.
   - **Schemat** — uzasadnienia z §7: `id` obok klucza, czasy INTEGER ms,
-    `STRICT`, scalenie terminów w `run_at`, ogrodzenie numerem próby.
+    `STRICT`, scalenie terminów w `run_at`, dwa indeksy częściowe pod
+    zapytania, ogrodzenie numerem próby.
   - **SQLite współdzielony przez kilka kontenerów: ograniczenia**
     [ustalone].
 
@@ -676,8 +801,8 @@ Narzędzie: pytest. Kluczowe obszary:
     Wariant z osobnymi kontenerami na wspólnym wolumenie potwierdzają
     scenariusz `scaling` (§13) i benchmark nr 3 (§13a). README podaje ich
     wyniki jako dowód.
-  - Semantykę „dokładnie raz” (§4), dwuprogową retencję (§11), jeden
-    proces uvicorn (§3), granicę jednego hosta (§16).
+  - Semantykę „dokładnie raz” z restartem API (§4), dwuprogową retencję
+    (§11), jeden proces uvicorn (§3).
 - Ten dokument i zapis brainstormingu w `docs/superpowers/specs/`.
 
 ## 15a. Jakość kodu i CI
@@ -727,7 +852,8 @@ widoczny jako badge w README [decyzja projektanta].
 - Szczegóły skryptu testu obciążeniowego i formatu raportu.
 - Treść sekcji TODO w README (minimum: HMAC, współdzielony rate limit,
   pełny stos obserwowalności, PostgreSQL/broker, narzędzie migracji,
-  endpoint do ręcznego ponowienia `failed`, dead-letter/alerty,
+  endpoint do ręcznego ponowienia `failed`, endpoint listujący zdarzenia
+  `failed`/zaległe dla operatora, dead-letter/alerty,
   wykrywanie niezgodności treści przy ponowieniu z tym samym kluczem,
   `auto_vacuum=INCREMENTAL` jako opcja odzyskiwania miejsca — §11).
   Obowiązkowo także punkt [ustalone]: **doprecyzować z nadawcami format
