@@ -3,7 +3,14 @@ import sqlite3
 
 from webhook_receiver.common.clock import Clock
 from webhook_receiver.common.db import ConnectionPool, immediate
-from webhook_receiver.common.models import Event, RecoveryResult, Status
+from webhook_receiver.common.models import (
+    Event,
+    PurgeResult,
+    QueueStats,
+    RecoveryResult,
+    RetentionPolicy,
+    Status,
+)
 
 # The WHERE terms below must repeat the partial-index predicates literally
 # (see SCHEMA_SQL): SQLite does not do algebra on them.
@@ -23,6 +30,43 @@ RECOVER_FAIL_SQL = (
     "UPDATE webhook_events SET status = 'failed', finished_at = :now,"
     " last_error = 'lease expired'"
     " WHERE status = 'processing' AND run_at <= :now AND attempts >= :max"
+)
+
+STATS_READY_SQL = (
+    "SELECT status, COUNT(*) AS n FROM webhook_events"
+    " WHERE status IN ('pending', 'retrying') GROUP BY status"
+)
+STATS_PROCESSING_SQL = (
+    "SELECT COUNT(*) FROM webhook_events WHERE status = 'processing'"
+)
+# Due and unclaimed work: ready rows that are due, and expired leases.
+OLDEST_READY_SQL = (
+    "SELECT MIN(run_at) FROM webhook_events"
+    " WHERE status IN ('pending', 'retrying') AND run_at <= :now"
+)
+OLDEST_LEASED_SQL = (
+    "SELECT MIN(run_at) FROM webhook_events"
+    " WHERE status = 'processing' AND run_at <= :now"
+)
+# Retention: `finished_at IS NOT NULL` matches ix_events_finished; batches
+# use `id IN (SELECT ... LIMIT)` because `UPDATE/DELETE ... LIMIT` needs a
+# compile-time option missing from many SQLite builds.
+PURGE_PAYLOAD_SQL = (
+    "UPDATE webhook_events SET payload_json = NULL, result_json = NULL"
+    " WHERE id IN (SELECT id FROM webhook_events"
+    " WHERE status = 'completed' AND finished_at IS NOT NULL"
+    " AND finished_at < :cutoff AND payload_json IS NOT NULL"
+    " LIMIT :limit)"
+)
+PURGE_COMPLETED_SQL = (
+    "DELETE FROM webhook_events WHERE id IN (SELECT id FROM webhook_events"
+    " WHERE status = 'completed' AND finished_at IS NOT NULL"
+    " AND finished_at < :cutoff LIMIT :limit)"
+)
+PURGE_FAILED_SQL = (
+    "DELETE FROM webhook_events WHERE id IN (SELECT id FROM webhook_events"
+    " WHERE status = 'failed' AND finished_at IS NOT NULL"
+    " AND finished_at < :cutoff LIMIT :limit)"
 )
 
 
@@ -165,3 +209,59 @@ class EventRepository:
                     (retry_at, error, event_id, attempt),
                 )
             return cur.rowcount == 1
+
+    def queue_stats(self) -> QueueStats:
+        """Counts of unfinished events and age of the oldest due work."""
+        now = self._clock.now_ms()
+        conn = self._pool.get()
+        # One read transaction so all four queries see the same snapshot.
+        conn.execute("BEGIN")
+        try:
+            ready = dict(conn.execute(STATS_READY_SQL).fetchall())
+            (processing,) = conn.execute(STATS_PROCESSING_SQL).fetchone()
+            params = {"now": now}
+            (oldest_ready,) = conn.execute(OLDEST_READY_SQL, params).fetchone()
+            (oldest_leased,) = conn.execute(
+                OLDEST_LEASED_SQL, params
+            ).fetchone()
+        finally:
+            conn.execute("COMMIT")
+        due = [t for t in (oldest_ready, oldest_leased) if t is not None]
+        return QueueStats(
+            pending=ready.get("pending", 0),
+            retrying=ready.get("retrying", 0),
+            processing=processing,
+            oldest_due_age_ms=now - min(due) if due else 0,
+        )
+
+    def purge(self, policy: RetentionPolicy) -> PurgeResult:
+        """Apply two-tier retention to finished events, in batches."""
+        if policy.batch_size <= 0:
+            # A negative SQLite LIMIT means "no limit".
+            raise ValueError("batch_size must be positive")
+        now = self._clock.now_ms()
+        return PurgeResult(
+            payloads_cleared=self._purge_batches(
+                PURGE_PAYLOAD_SQL, now - policy.payload_ms, policy.batch_size
+            ),
+            completed_deleted=self._purge_batches(
+                PURGE_COMPLETED_SQL,
+                now - policy.completed_ms,
+                policy.batch_size,
+            ),
+            failed_deleted=self._purge_batches(
+                PURGE_FAILED_SQL, now - policy.failed_ms, policy.batch_size
+            ),
+        )
+
+    def _purge_batches(self, sql: str, cutoff: int, limit: int) -> int:
+        # Each batch commits on its own so writers are never blocked long.
+        params = {"cutoff": cutoff, "limit": limit}
+        conn = self._pool.get()
+        total = 0
+        while True:
+            with immediate(conn):
+                changed = conn.execute(sql, params).rowcount
+            if changed == 0:
+                return total
+            total += changed
