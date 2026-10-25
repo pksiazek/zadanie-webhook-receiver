@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Named volumes are created root-owned; hand the Claude and gh config dirs
-# to vscode.
+# Named volumes (and the ~/.config parent Docker creates for the gh mount)
+# are root-owned; hand them to vscode.
+sudo chown vscode:vscode /home/vscode/.config
 sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh
 
 # The base image ships a Yarn apt repo with an expired signing key, which
