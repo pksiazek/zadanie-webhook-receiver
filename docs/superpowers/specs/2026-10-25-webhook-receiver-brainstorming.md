@@ -228,3 +228,26 @@ wznowiona z zachowanego zapisu.
 - Nazwy instrumentów OTel bez sufiksów (eksporter Prometheus je dokleja).
 - Jeden proces uvicorn dla API (stan limitera w pamięci).
 - Jeden span `webhook.process` na próbę, dziecko spana żądania.
+
+## 12. Przegląd decyzji projektanta przez użytkownika
+
+1. Readiness API niezależne od workera — **OK, ale musi być jasno opisane
+   w dokumentacji** → wymóg jawnej sekcji w README (§15).
+2. Pytanie „o co chodzi z `--scale`?” — wyjaśnienie: `docker compose up
+   --scale worker=N` uruchamia N kontenerów workera; stały port hosta dla
+   metryk workera kolidowałby między replikami, stąd metryki workera tylko w
+   sieci compose, a stan kolejki na `/metrics` API.
+3. Unikalność klucza w obrębie nadawcy — **odrzucone: `idempotency_key` jest
+   globalny.** Pomysł wziął się z ekstrapolacji „kilku systemów
+   zewnętrznych” + rate limitingu per `X-Source`; zadanie tego nie mówi.
+   `X-Source` służy tylko do rate limitingu i obserwowalności; `GET` go nie
+   wymaga; duplikat z innego źródła o tej samej treści to zwykły duplikat
+   (decyzja projektanta).
+4. Ograniczony zestaw znaków klucza — **odrzucone („nie podoba mi się”).**
+   Uzasadnienie ograniczenia (klucz w ścieżce URL) rozwiązane inaczej:
+   dowolny string ≤ 255 znaków, kodowanie procentowe w ścieżce `GET`,
+   `Location`/`status_url` zwracane zakodowane.
+5. `synchronous=FULL` — **OK, dopisać decyzję do dokumentacji** → pełne
+   uzasadnienie w §7 i wymóg w README.
+6. Domyślne parametry — OK.
+7. Jeden proces uvicorn — OK.

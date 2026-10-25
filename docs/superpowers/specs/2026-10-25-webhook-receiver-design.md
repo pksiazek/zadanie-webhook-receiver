@@ -83,7 +83,7 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 Dokładnie-raz end-to-end jest niemożliwe bez współpracy efektu ubocznego.
 Gwarantujemy [ustalone — do opisania w README]:
 
-- **Przyjęcie dokładnie raz:** `UNIQUE(source, idempotency_key)` w SQLite;
+- **Przyjęcie dokładnie raz:** `UNIQUE(idempotency_key)` w SQLite;
   zapis i decyzja „nowe/duplikat/konflikt” w jednej transakcji.
 - **Wykonanie co najmniej raz:** jeśli worker padnie w trakcie, rezerwacja
   (lease) wygasa i zdarzenie jest podejmowane ponownie.
@@ -144,10 +144,12 @@ Ciało:
 }
 ```
 
-Walidacja: `idempotency_key` — dopasowany do `^[A-Za-z0-9._:-]{1,255}$`
-(klucz trafia do ścieżki URL i nagłówka `Location`, więc bez znaków
-wymagających kodowania) [decyzja projektanta]; `X-Source` — ten sam zestaw
-znaków, maks. 64;
+Walidacja: `idempotency_key` — dowolny niepusty string, maks. 255 znaków,
+bez ograniczenia zestawu znaków [ustalone]. W ścieżce `GET` klucz jest
+kodowany procentowo (RFC 3986, np. `evt/1` → `evt%2F1`); serwer dekoduje
+całą ścieżkę po `/webhooks/` (łącznie z `/`), a `Location` i `status_url`
+zwracane są już zakodowane, więc klient może ich użyć wprost.
+`X-Source` — niepusty string, maks. 64 znaki;
 `event_type` — niepusty string; `payload` — obiekt JSON. Limit rozmiaru
 ciała: 256 KiB → `413` [decyzja projektanta]. Błędy walidacji → `422`.
 
@@ -165,15 +167,18 @@ Odpowiedzi:
 „Ta sama treść” = równy hash SHA-256 kanonicznego JSON-a (posortowane klucze,
 bez białych znaków) z pól `event_type` + `payload` [decyzja projektanta].
 
-Unikalność klucza liczona **w obrębie nadawcy** — `(source,
-idempotency_key)` — bo różne systemy zewnętrzne mogą niezależnie generować
-te same klucze [decyzja projektanta].
+`idempotency_key` jest **globalnie unikalny** [ustalone]. `X-Source`
+służy wyłącznie do rate limitingu i obserwowalności (metryki, logi,
+atrybuty spanów) — nie jest częścią tożsamości zdarzenia ani hasha. W
+rekordzie zapisujemy źródło pierwszego zgłoszenia; ponowienie z innego
+źródła z identyczną treścią to zwykły duplikat (`200`) [decyzja
+projektanta].
 
 `202` zwracane **dopiero po zatwierdzeniu transakcji** na dysku.
 
 ### `GET /webhooks/{idempotency_key}`
 
-Wymaga `X-Source` (klucz jest unikalny w obrębie nadawcy). Zwraca:
+Nie wymaga `X-Source` (klucz jest globalny). Zwraca:
 
 ```json
 {
@@ -205,8 +210,8 @@ NULL`. Nieznany klucz → `404`.
   **Brak workera nie wpływa na gotowość API** — przyjmowanie ma działać
   niezależnie od przetwarzania (to cel architektury B). Stan workerów jest
   raportowany informacyjnie w ciele odpowiedzi (`workers_alive`, wiek
-  najświeższego heartbeatu) oraz metryką [decyzja projektanta, po
-  recenzji].
+  najświeższego heartbeatu) oraz metryką [ustalone — wymaga jawnego opisu
+  w README, patrz §15].
 - `GET /metrics` — metryki w formacie Prometheus (eksporter OpenTelemetry),
   **w tym gauge'e kolejki** (`webhook_queue_depth{status}`,
   `webhook_queue_oldest_pending_age_seconds`, `webhook_workers_alive`)
@@ -219,8 +224,8 @@ NULL`. Nieznany klucz → `404`.
 ```sql
 CREATE TABLE webhook_events (
     id               INTEGER PRIMARY KEY,
-    source           TEXT    NOT NULL,
-    idempotency_key  TEXT    NOT NULL,
+    source           TEXT    NOT NULL,   -- X-Source pierwszego zgłoszenia
+    idempotency_key  TEXT    NOT NULL UNIQUE,
     event_type       TEXT    NOT NULL,
     payload_json     TEXT,               -- NULL po wyczyszczeniu (retencja)
     payload_hash     TEXT    NOT NULL,   -- zostaje do wykrywania konfliktów
@@ -237,8 +242,7 @@ CREATE TABLE webhook_events (
     created_at       TEXT    NOT NULL,
     updated_at       TEXT    NOT NULL,
     finished_at      TEXT,               -- completed lub failed
-    payload_purged_at TEXT,
-    UNIQUE (source, idempotency_key)
+    payload_purged_at TEXT
 );
 
 -- pobieranie pracy: tylko wiersze gotowe do podjęcia
@@ -261,10 +265,16 @@ CREATE TABLE worker_heartbeats (
 Czas: ISO 8601 UTC [dla wykonawcy: format/typ, byle porównywalny
 leksykograficznie lub liczbowo w SQL].
 
-Ustawienia połączenia [decyzja projektanta]: `journal_mode=WAL`,
-`busy_timeout=5000`, `synchronous=FULL` (po `202` zapis musi przetrwać także
-awarię zasilania — koszt wydajności mierzymy w teście obciążeniowym i
-opisujemy w README), `foreign_keys=ON`. Transakcje zapisujące otwierane
+Ustawienia połączenia: `journal_mode=WAL`, `busy_timeout=5000`,
+`foreign_keys=ON` oraz **`synchronous=FULL`** [ustalone — decyzja
+zapisywana w README w sekcji tradeoffów]. Uzasadnienie: `202` jest
+obietnicą trwałości; w trybie WAL `synchronous=NORMAL` przetrwa awarię
+procesu, ale przy zaniku zasilania/awarii systemu może zgubić ostatnie
+zatwierdzone transakcje — czyli zdarzenia, którym już odpowiedziano `202`.
+`FULL` wykonuje fsync przy każdym commicie. Koszt zmierzony w recenzji:
+~0,75 ms/transakcję (~1300 tx/s przy 3 procesach piszących) wobec
+potrzebnych ~17 INSERT/s + porównywalnej liczby UPDATE — pomijalny;
+potwierdzamy w teście obciążeniowym. Transakcje zapisujące otwierane
 `BEGIN IMMEDIATE`, żeby uniknąć zakleszczeń przy podnoszeniu blokady.
 
 Migracje: idempotentny skrypt `CREATE … IF NOT EXISTS` wykonywany przy
@@ -485,7 +495,15 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 - Zmiana devcontainera: feature `docker-in-docker`.
 - README: architektura, gwarancje (§4), tradeoffy, uruchomienie (lokalnie i
   w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego,
-  założenia skalowalności, sekcja **TODO**.
+  założenia skalowalności, sekcja **TODO**. Sekcja tradeoffów musi jawnie
+  opisywać co najmniej [ustalone]:
+  - **Readiness API niezależne od workera** — co oznacza dla operatora
+    (`/ready` zielone przy niedziałającym workerze; jak wtedy wykryć
+    problem: `webhook_workers_alive`, `webhook_queue_oldest_pending_age_seconds`,
+    pole `workers_alive` w `/ready`) i dlaczego tak wybrano.
+  - **`synchronous=FULL`** — dlaczego nie `NORMAL`, z pomiarem kosztu.
+  - Semantykę „dokładnie raz” (§4), dwuprogową retencję (§11), jeden
+    proces uvicorn (§3), granicę jednego hosta (§16).
 - Ten dokument i zapis brainstormingu w `docs/superpowers/specs/`.
 
 ## 16. Założenia skalowalności (do README)
