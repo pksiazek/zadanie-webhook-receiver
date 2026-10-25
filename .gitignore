@@ -9,3 +9,4 @@ __pycache__/
 *.db-shm
 data/
 .claude/settings.local.json
+.coverage
