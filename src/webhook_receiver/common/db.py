@@ -7,7 +7,7 @@ from pathlib import Path
 
 MIN_SQLITE_VERSION: tuple[int, int, int] = (3, 37, 0)
 
-_WAL_ATTEMPTS = 5
+_WAL_ATTEMPTS = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS webhook_events (
@@ -48,14 +48,27 @@ def _enable_wal(
     conn: sqlite3.Connection,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
+    """Switch to WAL, retrying on contention.
+
+    busy_timeout does not cover the journal-mode switch, so concurrent first
+    starts on a fresh file can see "database is locked"; retry those too.
+    """
+    last_exc: sqlite3.OperationalError | None = None
     for attempt in range(1, _WAL_ATTEMPTS + 1):
-        if conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal":
-            return
+        try:
+            if conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal":
+                return
+            last_exc = None
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            last_exc = exc
         if attempt < _WAL_ATTEMPTS:
-            sleep(0.05 * attempt)
+            sleep(min(0.05 * attempt, 0.5))
     raise RuntimeError(
         f"could not enable WAL journal mode after {_WAL_ATTEMPTS} attempts"
-    )
+    ) from last_exc
 
 
 def connect(

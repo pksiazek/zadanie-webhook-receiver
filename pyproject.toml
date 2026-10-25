@@ -25,6 +25,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-cov==7.1.0",
+    "pytest-timeout==2.4.0",
     "httpx==0.28.1",
     "ruff==0.17.2",
 ]
@@ -45,6 +46,7 @@ select = ["E", "W", "N", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+timeout = 60
 addopts = "--cov=webhook_receiver --cov-report=term-missing"
 
 [tool.coverage.report]
