@@ -526,3 +526,8 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 - Treść sekcji TODO w README (minimum: HMAC, współdzielony rate limit,
   pełny stos obserwowalności, PostgreSQL/broker, narzędzie migracji,
   endpoint do ręcznego ponowienia `failed`, dead-letter/alerty).
+  Obowiązkowo także punkt [ustalone]: **doprecyzować z nadawcami format
+  `idempotency_key`** (zestaw znaków, długość, struktura) i na tej podstawie
+  dobrać najlepsze rozwiązanie — obecne (dowolny string + kodowanie
+  procentowe w ścieżce), ograniczony zestaw znaków albo klucz poza ścieżką
+  (parametr zapytania / wewnętrzny identyfikator).

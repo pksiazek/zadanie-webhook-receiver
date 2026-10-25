@@ -251,3 +251,9 @@ wznowiona z zachowanego zapisu.
    uzasadnienie w §7 i wymóg w README.
 6. Domyślne parametry — OK.
 7. Jeden proces uvicorn — OK.
+
+Powrót do formatu klucza: przedstawiono trzy warianty (dowolny string +
+kodowanie procentowe; ograniczony zestaw znaków — ryzyko odrzucania
+legalnych webhooków; klucz poza ścieżką). **Decyzja: zostaje obecny
+wariant; w TODO punkt o doprecyzowaniu formatu `idempotency_key` i doborze
+najlepszego rozwiązania.**
