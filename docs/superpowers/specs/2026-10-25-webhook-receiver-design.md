@@ -61,8 +61,19 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 
 ## 3. Ograniczenia
 
-- Python 3.12 (devcontainer), FastAPI [ustalone], SQLite [wymóg zadania]
-  (wersja biblioteki 3.40 — dostępne `RETURNING`, WAL).
+- **Python 3.14** [ustalone] — w devcontainerze, obrazie Dockera i CI; baza
+  obrazów Debian trixie (devcontainer `python:…-3.14-trixie`, Docker
+  `python:3.14-slim`). 3.15 odrzucony jako zbyt świeży (wydany ~2 tyg.
+  temu — ryzyko braku gotowych wheeli zależności). Zmiana obrazu
+  devcontainera razem z dodaniem docker-in-docker (jedna przebudowa).
+- FastAPI [ustalone], SQLite [wymóg zadania]. **Minimalna wersja biblioteki
+  SQLite: 3.37** (`RETURNING` od 3.35, `STRICT` od 3.37) [ustalone];
+  Python używa systemowej `libsqlite3` obrazu (bookworm: 3.40.1 —
+  zweryfikowane; trixie: ~3.46 — do potwierdzenia przy implementacji).
+  Każdy proces sprawdza `sqlite3.sqlite_version` przy starcie i kończy się
+  czytelnym błędem poniżej minimum. Najnowszego SQLite (3.54.1) nie
+  dołączamy — wymagałoby kompilacji lub osobnej paczki, a nie daje
+  potrzebnych nam funkcji.
 - Dockerfile [wymóg], README z architekturą, tradeoffami, instrukcją
   uruchomienia i sekcją TODO [wymóg].
 - Budżet zadania 2–4 h; zakres bonusowy świadomie go przekracza [ustalone].
@@ -274,7 +285,9 @@ Uzasadnienia (do README):
   `datetime(col/1000, 'unixepoch')`.
 - **`status` jako `TEXT` + `CHECK`** — świadomie: czytelność dla operatora w
   `sqlite3` ważniejsza niż kilka bajtów enuma liczbowego.
-- **JSON jako `TEXT`** — funkcje JSON w SQLite 3.40 działają na TEXT.
+- **JSON jako `TEXT`** — funkcje JSON w SQLite działają na TEXT; binarny
+  JSONB (od 3.45) nie jest potrzebny — payload tylko zapisujemy i
+  odczytujemy w całości.
 - **`STRICT`** — SQLite domyślnie przyjmie np. tekst w kolumnie liczbowej;
   `STRICT` (≥ 3.37) wymusza deklarowane typy.
 - **`run_at` zamiast osobnych terminów** (wzorzec „visibility timeout”, jak
@@ -674,7 +687,7 @@ Narzędzie: pytest. Kluczowe obszary:
 - Narzędzie: **ruff** (lint + formatowanie; już w devcontainerze).
 - Reguły w `pyproject.toml`: `E`, `W` (pycodestyle — PEP 8), `N`
   (pep8-naming), `F` (pyflakes), `I` (kolejność importów), `B`
-  (bugbear), `UP` (składnia Pythona 3.12).
+  (bugbear), `UP` (składnia Pythona 3.14).
 - **Długość linii 79** — dosłownie wg PEP 8 (zamiast domyślnych 88 w ruff).
 - `ruff check` i `ruff format --check` muszą przechodzić bez błędów dla
   całego kodu: aplikacji, testów, skryptu obciążeniowego i benchmarków. `# noqa` tylko z

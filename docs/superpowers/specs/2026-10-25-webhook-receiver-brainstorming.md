@@ -412,3 +412,16 @@ Uwagi użytkownika i zmiany:
   wieloarchitekturowy, test obciążeniowy i benchmarki jako kontener
   (profil `loadtest`), instrukcja w README, `docker build` w CI.
 - Wersje SQLite/Pythona — w toku (patrz następna sekcja).
+
+## 22. Wersje Pythona i SQLite
+
+Uwaga użytkownika: „SQLite jest 3.54.1; Python — czy warto nowszą wersję?”
+
+Ustalenia: 3.54.1 to najnowsze wydanie upstream, ale Python używa
+systemowej `libsqlite3` (w devcontainerze bookworm zweryfikowano 3.40.1).
+Bundlowanie 3.54 nie jest warte kosztu — potrzebne funkcje (`RETURNING`,
+`STRICT`) są od 3.37. Python 3.15 (wydany ~9.10.2026) zbyt świeży; 3.14
+stabilny od roku, z nowszą bazą Debiana (trixie).
+
+**Decyzja: Python 3.14 (Debian trixie) w devcontainerze, obrazie i CI;
+minimum SQLite 3.37 sprawdzane przy starcie.**
