@@ -10,14 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
           python-version: "3.14"
       - name: Install
-        run: pip install -e ".[dev,loadtest]"
+        run: uv sync --locked --extra dev --extra loadtest
       - name: Lint
-        run: ruff check .
+        run: uv run ruff check .
       - name: Format check
-        run: ruff format --check .
+        run: uv run ruff format --check .
       - name: Test
-        run: pytest
+        run: uv run pytest
