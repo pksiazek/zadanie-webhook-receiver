@@ -844,9 +844,22 @@ widoczny jako badge w README [decyzja projektanta].
 - Granica: jeden host. Dalej: PostgreSQL (`SELECT … FOR UPDATE SKIP LOCKED`)
   lub broker z outboxem (→ TODO).
 
+## 16a. Struktura kodu
+
+[ustalone z użytkownikiem po akceptacji, przy przeglądzie planu]: jedna
+aplikacja — jeden pakiet `webhook_receiver`, jeden obraz, dwa punkty
+wejścia (`python -m webhook_receiver api|worker`). Podpakiety: `common/`
+(kontrakt bazy i infrastruktura: config, clock, models, db, repository,
+telemetry, logging), `api/` (tylko proces api: `app.py`, schemas,
+body_limit, ratelimit, queue_stats), `worker/` (tylko proces worker:
+`app.py`, http, backoff, simulation). Główne pliki obu aplikacji nazywają
+się tak samo: `api/app.py` (`create_app`) i `worker/app.py`
+(`create_worker`). Reguła importów: `api` i `worker` importują tylko z
+`common`, nigdy z siebie nawzajem (pilnuje test architektury); tryb
+`EMBEDDED_WORKER` składa `__main__.py`. Szczegóły w planie implementacji.
+
 ## 17. Pozostawione wykonawcy
 
-- Struktura pakietów i nazwy modułów.
 - Biblioteka do konfiguracji (np. `pydantic-settings`) i do logów JSON.
 - Sposób wykonywania operacji SQLite poza pętlą zdarzeń.
 - Szczegóły skryptu testu obciążeniowego i formatu raportu.

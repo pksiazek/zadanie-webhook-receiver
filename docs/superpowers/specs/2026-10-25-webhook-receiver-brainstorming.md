@@ -467,3 +467,18 @@ Decyzje użytkownika (rekomendacje projektanta przyjęte):
 
 **Dokument projektowy zaakceptowany przez użytkownika (2026-10-25).**
 Następny krok: plan implementacji (`superpowers:writing-plans`).
+
+## 25. Przegląd planu — struktura i sposób wykonania
+
+- Pytanie o wykonanie równoległe: przedstawiono podział na fale (zależności
+  zadań, koszt worktree i scalania, zysk ~30–40% czasu). **Decyzja:
+  wykonanie po kolei.**
+- Uwaga użytkownika: struktura plików nieczytelna — co wspólne, a co
+  należy do api/worker? Uzasadnienie jednego pakietu (wspólny kontrakt
+  bazy w jednej wersji) i podział na `common/`, `api/`, `worker/` z regułą
+  importów; `repository.py` wspólny celowo (zapytania muszą powtarzać
+  warunki indeksów i reguły ogrodzenia).
+- Uwaga użytkownika: ujednolicić nazwy głównych plików → `api/app.py` i
+  `worker/app.py` (+ `create_app` / `create_worker`).
+- **Decyzja: struktura zaakceptowana** (spec §16a, plan zaktualizowany).
+  Użytkownik nadal przegląda dokumenty — implementacja nie rozpoczęta.

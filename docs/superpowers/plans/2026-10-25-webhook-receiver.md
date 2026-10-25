@@ -74,38 +74,43 @@ Jaeger, GitHub Actions.
 
 ## Struktura plików
 
+Jedna aplikacja: jeden pakiet, jeden obraz, dwa punkty wejścia
+(`python -m webhook_receiver api|worker`) [ustalone z użytkownikiem]. Jeden
+pakiet, bo kontrakt między procesami (schemat, statusy, `run_at`,
+ogrodzenie) musi być w jednej wersji po obu stronach.
+
 ```
-.devcontainer/devcontainer.json          # obraz 3.14-trixie + docker-in-docker
-pyproject.toml                           # zależności, ruff, pytest, coverage
 src/webhook_receiver/
-  __init__.py
-  __main__.py                            # CLI: api | worker
-  config.py                              # Settings (env)
-  clock.py                               # Clock, SystemClock
-  models.py                              # Status, Event, QueueStats, …
-  db.py                                  # connect, immediate, schema, pool
-  repository.py                          # EventRepository (całe SQL)
-  backoff.py                             # backoff_ms
-  simulation.py                          # simulate, SimulatedFailure
-  ratelimit.py                           # RateLimiter
-  queue_stats.py                         # QueueStatsCache
-  telemetry.py                           # tracing, metryki, traceparent
-  logging_setup.py                       # logi JSON z trace_id
-  api/__init__.py
-  api/app.py                             # create_app, trasy
-  api/schemas.py                         # WebhookIn, StatusOut
-  api/body_limit.py                      # BodySizeLimitMiddleware
-  worker.py                              # Worker
-  worker_http.py                         # /health, /metrics na 9100
-loadtest/run.py, loadtest/stats.py       # generator i raport
-scripts/scaling.sh                       # orkiestracja scenariusza scaling
-benchmarks/sqlite_bench.py               # 4 benchmarki
-tests/fakes.py, tests/conftest.py
-tests/unit/…, tests/integration/…, tests/loadtest/…
-Dockerfile, docker-compose.yml, .dockerignore
-.github/workflows/ci.yml
-README.md
+  __main__.py          # CLI: api | worker; składa też tryb EMBEDDED_WORKER
+  common/              # wspólne: kontrakt bazy i infrastruktura
+    config.py          #   Settings (env)
+    clock.py           #   Clock, SystemClock
+    models.py          #   Status, Event, QueueStats, …
+    db.py              #   connect, immediate, schema, ConnectionPool
+    repository.py      #   EventRepository — całe SQL obu procesów
+    telemetry.py       #   tracing, metryki, traceparent
+    logging_setup.py   #   logi JSON z trace_id
+  api/                 # tylko proces api
+    app.py             #   create_app() — trasy, lifespan
+    schemas.py         #   WebhookIn, StatusOut
+    body_limit.py      #   BodySizeLimitMiddleware
+    ratelimit.py       #   RateLimiter
+    queue_stats.py     #   QueueStatsCache
+  worker/              # tylko proces worker
+    app.py             #   Worker + create_worker() — pętla, sloty
+    http.py            #   /health, /metrics na 9100
+    backoff.py         #   backoff_ms
+    simulation.py      #   simulate, SimulatedFailure
+tests/unit/{common,api,worker}/   tests/integration/   tests/loadtest/
+tests/fakes.py  tests/conftest.py
+loadtest/ (run.py, stats.py)  benchmarks/sqlite_bench.py  scripts/scaling.sh
+Dockerfile  docker-compose.yml  .dockerignore  .github/workflows/ci.yml
+pyproject.toml  README.md  .devcontainer/devcontainer.json
 ```
+
+**Reguła importów:** `api` i `worker` importują z `common`, nigdy z siebie
+nawzajem; `common` nie importuje ani `api`, ani `worker`. Pilnuje tego
+test architektury (Task 11). Wykonanie zadań **po kolei** [ustalone].
 
 ---
 
@@ -147,9 +152,10 @@ Expected: `Python 3.14.x`, `3.46.1`, wersja serwera Dockera, `Docker Compose ver
 
 **Files:**
 - Create: `pyproject.toml`, `src/webhook_receiver/__init__.py`,
-  `src/webhook_receiver/config.py`, `src/webhook_receiver/clock.py`,
+  `src/webhook_receiver/common/__init__.py`,
+  `src/webhook_receiver/common/config.py`, `src/webhook_receiver/common/clock.py`,
   `tests/__init__.py`, `tests/fakes.py`, `tests/conftest.py`,
-  `tests/unit/test_config.py`, `.github/workflows/ci.yml`
+  `tests/unit/common/test_config.py`, `.github/workflows/ci.yml`
 
 **Interfaces:**
 - Produces:
@@ -215,12 +221,12 @@ def test_lease_must_exceed_simulation():
 
 - [ ] **Step 3: Uruchom — FAIL**
 
-Run: `pip install -e ".[dev,loadtest]" && pytest tests/unit/test_config.py -v`
+Run: `pip install -e ".[dev,loadtest]" && pytest tests/unit/common/test_config.py -v`
 Expected: FAIL (`ImportError: Settings`).
 
 - [ ] **Step 4: Zaimplementuj `config.py`, `clock.py`, `tests/fakes.py`**
 
-- [ ] **Step 5: Uruchom — PASS** (`pytest tests/unit/test_config.py -v`)
+- [ ] **Step 5: Uruchom — PASS** (`pytest tests/unit/common/test_config.py -v`)
 
 - [ ] **Step 6: `.github/workflows/ci.yml`**
 
@@ -244,8 +250,8 @@ git add -A && git commit -m "feat: project skeleton, settings, clock, CI" && git
 ### Task 2: Warstwa bazy — połączenie, transakcje, schemat
 
 **Files:**
-- Create: `src/webhook_receiver/db.py`, `src/webhook_receiver/models.py`,
-  `tests/unit/test_db.py`
+- Create: `src/webhook_receiver/common/db.py`, `src/webhook_receiver/common/models.py`,
+  `tests/unit/common/test_db.py`
 
 **Interfaces:**
 - Consumes: —
@@ -317,7 +323,7 @@ def test_pool_returns_connection_per_thread(tmp_path):
     # pool.get() w wątku głównym is pool.get(); w innym wątku — inny obiekt
 ```
 
-- [ ] **Step 2: Uruchom — FAIL** (`pytest tests/unit/test_db.py -v`)
+- [ ] **Step 2: Uruchom — FAIL** (`pytest tests/unit/common/test_db.py -v`)
 
 - [ ] **Step 3: Zaimplementuj `db.py` i `models.py`**
 
@@ -330,8 +336,8 @@ def test_pool_returns_connection_per_thread(tmp_path):
 ### Task 3: Repozytorium — przyjęcie i odczyt
 
 **Files:**
-- Create: `src/webhook_receiver/repository.py`,
-  `tests/unit/test_repository_intake.py`
+- Create: `src/webhook_receiver/common/repository.py`,
+  `tests/unit/common/test_repository_intake.py`
 
 **Interfaces:**
 - Consumes: `ConnectionPool`, `immediate`, `Event`, `Status`, `Clock`.
@@ -386,8 +392,8 @@ Fixture `repo` (w `tests/conftest.py`): `FakeClock`, `ConnectionPool(tmp_path
 ### Task 4: Repozytorium — claim, odzyskiwanie, wynik z ogrodzeniem
 
 **Files:**
-- Modify: `src/webhook_receiver/repository.py`
-- Create: `tests/unit/test_repository_lifecycle.py`
+- Modify: `src/webhook_receiver/common/repository.py`
+- Create: `tests/unit/common/test_repository_lifecycle.py`
 
 **Interfaces:**
 - Produces (metody `EventRepository`):
@@ -449,8 +455,8 @@ test).
 ### Task 5: Repozytorium — statystyki kolejki i retencja
 
 **Files:**
-- Modify: `src/webhook_receiver/repository.py`
-- Create: `tests/unit/test_repository_stats_retention.py`
+- Modify: `src/webhook_receiver/common/repository.py`
+- Create: `tests/unit/common/test_repository_stats_retention.py`
 
 **Interfaces:**
 - Produces:
@@ -497,9 +503,10 @@ def test_stats_and_purge_queries_use_indexes(repo)   # bez "SCAN webhook_events"
 ### Task 6: Backoff i symulacja przetwarzania
 
 **Files:**
-- Create: `src/webhook_receiver/backoff.py`,
-  `src/webhook_receiver/simulation.py`, `tests/unit/test_backoff.py`,
-  `tests/unit/test_simulation.py`
+- Create: `src/webhook_receiver/worker/__init__.py`,
+  `src/webhook_receiver/worker/backoff.py`,
+  `src/webhook_receiver/worker/simulation.py`, `tests/unit/worker/test_backoff.py`,
+  `tests/unit/worker/test_simulation.py`
 
 **Interfaces:**
 - Produces:
@@ -546,7 +553,8 @@ async def test_simulate_success_without_trigger(): ...
 ### Task 7: Rate limiter
 
 **Files:**
-- Create: `src/webhook_receiver/ratelimit.py`, `tests/unit/test_ratelimit.py`
+- Create: `src/webhook_receiver/api/__init__.py`,
+  `src/webhook_receiver/api/ratelimit.py`, `tests/unit/api/test_ratelimit.py`
 
 **Interfaces:**
 - Produces:
@@ -585,9 +593,9 @@ def test_lru_bounds_memory(clock):
 ### Task 8: Telemetria — tracing, traceparent, metryki, logi JSON
 
 **Files:**
-- Create: `src/webhook_receiver/telemetry.py`,
-  `src/webhook_receiver/logging_setup.py`,
-  `tests/unit/test_telemetry.py`, `tests/unit/test_logging.py`
+- Create: `src/webhook_receiver/common/telemetry.py`,
+  `src/webhook_receiver/common/logging_setup.py`,
+  `tests/unit/common/test_telemetry.py`, `tests/unit/common/test_logging.py`
 - Modify: `tests/conftest.py` (sesyjna fixture telemetrii)
 
 **Interfaces:**
@@ -669,10 +677,9 @@ instrumentów (nie asercje), aby `/metrics` dawał nazwy z §12.
 ### Task 9: Cache statystyk kolejki i middleware limitu ciała
 
 **Files:**
-- Create: `src/webhook_receiver/queue_stats.py`,
-  `src/webhook_receiver/api/__init__.py`,
+- Create: `src/webhook_receiver/api/queue_stats.py`,
   `src/webhook_receiver/api/body_limit.py`,
-  `tests/unit/test_queue_stats.py`, `tests/unit/test_body_limit.py`
+  `tests/unit/api/test_queue_stats.py`, `tests/unit/api/test_body_limit.py`
 
 **Interfaces:**
 - Produces:
@@ -709,7 +716,7 @@ def test_body_limit_allows_small_body()
 
 **Files:**
 - Create: `src/webhook_receiver/api/schemas.py`,
-  `src/webhook_receiver/api/app.py`, `tests/unit/test_api.py`
+  `src/webhook_receiver/api/app.py`, `tests/unit/api/test_api.py`
 
 **Interfaces:**
 - Consumes: `Settings`, `Clock`, `ConnectionPool`, `init_schema`,
@@ -722,11 +729,13 @@ def test_body_limit_allows_small_body()
     dict[str, Any]`; `model_config = ConfigDict(extra="ignore")`.
   - `schemas.StatusOut(BaseModel)` — pola i mapowanie z §6 (przykład
     `GET`), `duplicate: bool | None = None` (pomijane w JSON gdy `None`).
-  - `create_app(settings: Settings, *, clock: Clock | None = None) ->
-    FastAPI` — lifespan: `check_sqlite_version`, `ConnectionPool`,
-    `init_schema`, `QueueStatsCache.start()`, przy
-    `settings.embedded_worker` start `Worker` (Task 11) w tle; zamknięcie
-    odwrotnie. `FastAPIInstrumentor.instrument_app(app,
+  - `create_app(settings: Settings, *, clock: Clock | None = None,
+    extra_lifespan: Callable[[EventRepository],
+    AbstractAsyncContextManager[None]] | None = None) -> FastAPI` —
+    lifespan: `check_sqlite_version`, `ConnectionPool`,
+    `init_schema`, `QueueStatsCache.start()`, potem `extra_lifespan(repo)`
+    jeśli podany; zamknięcie odwrotnie. `api` nie importuje `worker` —
+    tryb `EMBEDDED_WORKER` składa `__main__.py` (Task 11). `FastAPIInstrumentor.instrument_app(app,
     excluded_urls="health,ready,metrics")`. Dla testów `app.state` trzyma
     `repo`, `stats`, `limiter`.
 
@@ -803,10 +812,11 @@ def test_post_stores_traceparent_of_request_span(client, span_exporter)
 ### Task 11: Worker, serwer pomocniczy, CLI
 
 **Files:**
-- Create: `src/webhook_receiver/worker.py`,
-  `src/webhook_receiver/worker_http.py`,
-  `src/webhook_receiver/__main__.py`, `tests/unit/test_worker.py`,
-  `tests/unit/test_worker_http.py`, `tests/unit/test_main.py`
+- Create: `src/webhook_receiver/worker/app.py`,
+  `src/webhook_receiver/worker/http.py`,
+  `src/webhook_receiver/__main__.py`, `tests/unit/test_architecture.py`,
+  `tests/unit/worker/test_worker.py`,
+  `tests/unit/worker/test_worker_http.py`, `tests/unit/test_main.py`
 
 **Interfaces:**
 - Consumes: `EventRepository`, `Settings`, `Clock`, `simulate`,
@@ -841,13 +851,24 @@ def test_post_stores_traceparent_of_request_span(client, span_exporter)
     max_attempts`, inaczej `None`; `False` z repo → `metrics.stale_result()`
     + log `event=stale_result`; metryki `attempt` i `processing_duration`.
   - `async def run_retention_once(self) -> PurgeResult`.
-  - `worker_http.start_worker_http_server(port: int, worker: Worker) ->
+  - `create_worker(settings: Settings, repo: EventRepository, *, clock:
+    Clock | None = None) -> Worker` — fabryka (worker_id
+    `f"{hostname}-{pid}"`, `WorkerMetrics()`), symetryczna do
+    `create_app`.
+  - `__main__.embedded_worker_lifespan(settings: Settings) ->
+    Callable[[EventRepository], AbstractAsyncContextManager[None]]` —
+    uruchamia `create_worker(settings, repo).run()` jako zadanie w tle i
+    zatrzymuje je przy zamknięciu; przekazywane do
+    `create_app(extra_lifespan=...)`, gdy `settings.embedded_worker`.
+  - `worker/http.py`: `start_worker_http_server(port: int, worker: Worker) ->
     ThreadingHTTPServer` — `GET /health` → `200`/`503` wg
     `worker.healthy`; `GET /metrics` → `metrics_payload()`; inne → `404`;
     wątek daemon.
   - `__main__.main(argv: list[str] | None = None) -> int` — `api`:
     `setup_logging`, `setup_telemetry("webhook-api")`,
-    `uvicorn.run(create_app(Settings()), host="0.0.0.0",
+    `uvicorn.run(create_app(settings, extra_lifespan=
+    embedded_worker_lifespan(settings) if settings.embedded_worker else
+    None), host="0.0.0.0",
     port=settings.api_port, workers=1, log_config=None)`; `worker`:
     `check_sqlite_version`, pool, `init_schema`,
     `setup_telemetry("webhook-worker")`, serwer pomocniczy, `asyncio.run`
@@ -882,6 +903,10 @@ async def test_retention_runs_on_interval(worker_env)
 
 def test_worker_http_health_and_metrics(...)   # port 0, urllib
 def test_main_unknown_command_returns_2()
+
+def test_api_and_worker_do_not_import_each_other():
+    # ast po plikach pakietu: api/* nie importuje webhook_receiver.worker,
+    # worker/* nie importuje webhook_receiver.api, common/* żadnego z nich
 ```
 
 - [ ] **Step 2: FAIL** → **Step 3: implementacja** → **Step 4: PASS**
@@ -897,14 +922,16 @@ def test_main_unknown_command_returns_2()
   `tests/integration/test_end_to_end.py`
 
 **Interfaces:**
-- Consumes: `create_app` z `embedded_worker=True`, `Worker`, `main`.
+- Consumes: `create_app(extra_lifespan=embedded_worker_lifespan(...))`,
+  `create_worker`, `main`.
 
 - [ ] **Step 1: Testy (failing lub od razu zielone — wtedy zweryfikuj, że
   realnie przechodzą przez worker)**
 
 ```python
 def test_gist_examples_complete_end_to_end(tmp_path)
-    # TestClient(create_app(embedded_worker=True, szybka symulacja)),
+    # TestClient(create_app(settings, extra_lifespan=
+    #     embedded_worker_lifespan(settings))), szybka symulacja,
     # 5 webhooków z gistu → polling GET do "completed" (timeout 5 s)
 def test_duplicate_during_processing_not_reprocessed(tmp_path)
     # wynik (processed_by, attempt) niezmieniony po duplikacie
@@ -1133,7 +1160,7 @@ Decyzja „realizujemy / TODO” zapada po Task 16 (spec §12). Jeśli TAK:
 
 **Files:**
 - Create: `otel-collector.yaml`
-- Modify: `docker-compose.yml`, `src/webhook_receiver/telemetry.py`,
+- Modify: `docker-compose.yml`, `src/webhook_receiver/common/telemetry.py`,
   `README.md`
 
 - [ ] **Step 1:** Collector (`otel/opentelemetry-collector-contrib`,
