@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.db
+*.db-wal
+*.db-shm
+data/
+.claude/settings.local.json
