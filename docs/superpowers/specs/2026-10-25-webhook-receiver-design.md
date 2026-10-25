@@ -527,6 +527,25 @@ odpowiedzi, przebieg głębokości kolejki w czasie, czasy trwania faz,
 tabela przepustowości dla N = 1, 2, 3, wynik kryteriów (PASS/FAIL). Wyniki
 (z opisem sprzętu) trafiają do README.
 
+## 13a. Benchmarki
+
+Uzupełnienie testu obciążeniowego [ustalone — wszystkie cztery]: test
+obciążeniowy mierzy cały system, benchmarki — koszt pojedynczych operacji
+w izolacji, żeby decyzje projektowe opierały się na liczbach.
+
+| # | Benchmark | Co mierzy | Uzasadnia |
+|---|---|---|---|
+| 1 | `synchronous=FULL` vs `NORMAL` | czas transakcji przyjęcia (INSERT) w obu trybach | decyzję o `FULL` (§7) |
+| 2 | claim przy rosnącej kolejce | czas pobrania porcji pracy przy 0 / 10 000 / 100 000 oczekujących | indeks częściowy `ix_events_due`; claim nie zwalnia przy burst i blisko `MAX_BACKLOG` |
+| 3 | rywalizacja o zapis | przepustowość transakcji przy 1 / 2 / 4 / 8 procesach piszących | górną granicę skalowania workerów na SQLite; interpretację wyniku `scaling` (§13) |
+| 4 | retencja | czas usunięcia / wyczyszczenia porcji 1000 wierszy | rozmiar porcji retencji i czas blokady zapisu (§11) |
+
+Forma: skrypt(y) w `benchmarks/`, uruchamiane ręcznie, na pliku bazy na
+dysku (nie `:memory:`), z wieloma powtórzeniami i raportem mediany i p95.
+Wyniki (z opisem sprzętu) w tabeli w README. **Poza CI** — wyniki na
+współdzielonych maszynach GitHuba są zbyt zaszumione. Kod benchmarków
+podlega linterowi (§15a) [ustalone].
+
 ## 14. Testy
 
 **Testy są twardym wymaganiem** [ustalone]:
@@ -560,13 +579,14 @@ Narzędzie: pytest. Kluczowe obszary:
 
 - Kod (pakiet Pythona, `pyproject.toml`, konfiguracja ruff — §15a).
 - `.github/workflows/ci.yml` — lint, testy, build obrazu (§15a).
+- `benchmarks/` — cztery benchmarki z §13a.
 - `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`).
 - `docker-compose.yml`: `api`, `worker`, `jaeger`; nazwany wolumen z plikiem
   bazy; healthcheck API na `/ready`; healthcheck workera na jego `/health`
   (port 9100 w sieci compose); `stop_grace_period: 20s` dla workera.
 - Zmiana devcontainera: feature `docker-in-docker`.
 - README: architektura, gwarancje (§4), tradeoffy, uruchomienie (lokalnie i
-  w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego,
+  w Dockerze), przykładowe wywołania `curl`, wyniki testu obciążeniowego i benchmarków,
   założenia skalowalności, sekcja **TODO**. Sekcja tradeoffów musi jawnie
   opisywać co najmniej [ustalone]:
   - **Readiness API niezależne od workera** — co oznacza dla operatora
@@ -592,7 +612,7 @@ Narzędzie: pytest. Kluczowe obszary:
   (bugbear), `UP` (składnia Pythona 3.12).
 - **Długość linii 79** — dosłownie wg PEP 8 (zamiast domyślnych 88 w ruff).
 - `ruff check` i `ruff format --check` muszą przechodzić bez błędów dla
-  całego kodu: aplikacji, testów i skryptu obciążeniowego. `# noqa` tylko z
+  całego kodu: aplikacji, testów, skryptu obciążeniowego i benchmarków. `# noqa` tylko z
   komentarzem uzasadniającym.
 - Zielony linter jest warunkiem ukończenia **każdego** zadania w planie
   implementacji.

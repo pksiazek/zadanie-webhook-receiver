@@ -364,3 +364,16 @@ jednostkowe obowiązkowe dla każdego modułu z logiką, TDD, deterministyczne
 ukończenia zadania i blokadą CI, próg pokrycia 85% (`pytest-cov`).
 
 **Decyzja: zaakceptowane, próg 85%.**
+
+## 19. Benchmarki
+
+Pytanie użytkownika: czy mamy benchmarki, czy tylko testy obciążeniowe?
+
+Odpowiedź: tylko testy obciążeniowe (zadanie: „testy obciążeniowe **lub**
+benchmarki” — formalnie wystarcza). Benchmarki mierzą koszt pojedynczych
+operacji i zamieniają założenia w liczby. Zaproponowano cztery:
+`synchronous=FULL` vs `NORMAL`; claim przy kolejce 0/10k/100k; rywalizacja
+o zapis przy 1/2/4/8 procesach; koszt porcji retencji. Ręcznie, poza CI,
+wyniki w README.
+
+**Decyzja: wszystkie cztery.**
