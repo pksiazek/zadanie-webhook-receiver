@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "webhook-receiver"
+version = "0.1.0"
+description = "Webhook receiver: FastAPI API and async worker on SQLite"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi==0.162.0",
+    "uvicorn==0.54.0",
+    "pydantic-settings==2.16.1",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-prometheus==0.66b1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "prometheus-client==0.26.0",
+]
+
+[project.optional-dependencies]
+loadtest = ["httpx==0.28.1"]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "httpx==0.28.1",
+    "ruff==0.17.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/webhook_receiver"]
+
+[tool.ruff]
+line-length = 79
+target-version = "py314"
+src = ["src", "tests"]
+# Plans and specs contain illustrative code snippets, not project code.
+extend-exclude = ["docs", ".superpowers"]
+
+[tool.ruff.lint]
+select = ["E", "W", "N", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=webhook_receiver --cov-report=term-missing"
+
+[tool.coverage.report]
+fail_under = 85
