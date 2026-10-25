@@ -54,7 +54,6 @@ weryfikacja przed ukończeniem) [ustalone]. Repozytorium publiczne na GitHubie:
 
 - Zgubienie zdarzenia, któremu odpowiedziano `202`.
 - Ponowne przetworzenie duplikatu w normalnym trybie pracy.
-- Ciche połknięcie konfliktu (ten sam klucz, inna treść).
 - Przyjmowanie, które zwalnia lub pada, bo przetwarzanie nie nadąża.
 - Obietnica „exactly once” w README bez wyjaśnienia, co naprawdę jest
   gwarantowane.
@@ -84,7 +83,7 @@ Dokładnie-raz end-to-end jest niemożliwe bez współpracy efektu ubocznego.
 Gwarantujemy [ustalone — do opisania w README]:
 
 - **Przyjęcie dokładnie raz:** `UNIQUE(idempotency_key)` w SQLite;
-  zapis i decyzja „nowe/duplikat/konflikt” w jednej transakcji.
+  zapis i decyzja „nowe/duplikat” w jednej transakcji.
 - **Wykonanie co najmniej raz:** jeśli worker padnie w trakcie, rezerwacja
   (lease) wygasa i zdarzenie jest podejmowane ponownie.
 - **Efekt dokładnie raz:** zapis wyniku jest warunkowy — tylko ze stanu
@@ -159,21 +158,24 @@ Odpowiedzi:
 | Sytuacja | Kod | Ciało |
 |---|---|---|
 | nowe zdarzenie, zapisane trwale | `202 Accepted` | `{idempotency_key, status: "pending", status_url}` + nagłówek `Location` |
-| duplikat, identyczna treść | `200 OK` | aktualny status (jak w `GET`), pole `duplicate: true` |
-| ten sam klucz, inna treść | `409 Conflict` [ustalone] | opis konfliktu, aktualny status oryginału |
+| duplikat (ten sam `idempotency_key`) | `200 OK` | aktualny status (jak w `GET`), pole `duplicate: true` |
 | brak `X-Source` | `400` | opis błędu |
 | przekroczony limit nadawcy | `429` + `Retry-After` [ustalone] | opis |
 | przekroczony próg zaległości (backpressure) | `503` + `Retry-After` [decyzja projektanta] | opis |
 
-„Ta sama treść” = równy hash SHA-256 kanonicznego JSON-a (posortowane klucze,
-bez białych znaków) z pól `event_type` + `payload` [decyzja projektanta].
+**Duplikat = ten sam `idempotency_key`, niezależnie od treści** [ustalone —
+dosłownie wg zadania]. Treść ponowienia nie jest porównywana; zwracany jest
+status pierwotnego zdarzenia, a ponowienie nie jest zapisywane ani
+przetwarzane. Świadomy kompromis (do README): nadawca, który przez błąd
+użyje tego samego klucza dla innego zdarzenia, nie dostanie sygnału, a
+drugie zdarzenie przepadnie — wykrywanie niezgodności treści (hash +
+`409` lub metryka) → TODO.
 
 `idempotency_key` jest **globalnie unikalny** [ustalone]. `X-Source`
 służy wyłącznie do rate limitingu i obserwowalności (metryki, logi,
-atrybuty spanów) — nie jest częścią tożsamości zdarzenia ani hasha. W
-rekordzie zapisujemy źródło pierwszego zgłoszenia; ponowienie z innego
-źródła z identyczną treścią to zwykły duplikat (`200`) [decyzja
-projektanta].
+atrybuty spanów) — nie jest częścią tożsamości zdarzenia. W rekordzie
+zapisujemy źródło pierwszego zgłoszenia; ponowienie z innego źródła to
+zwykły duplikat (`200`).
 
 `202` zwracane **dopiero po zatwierdzeniu transakcji** na dysku.
 
@@ -233,7 +235,6 @@ CREATE TABLE webhook_events (
     source           TEXT    NOT NULL,            -- X-Source 1. zgłoszenia
     event_type       TEXT    NOT NULL,
     payload_json     TEXT,                        -- NULL po retencji
-    payload_hash     BLOB    NOT NULL,            -- SHA-256 kanonicznego JSON
     status           TEXT    NOT NULL CHECK (status IN
                        ('pending','processing','retrying','completed','failed')),
     attempts         INTEGER NOT NULL DEFAULT 0,  -- też token ogrodzenia
@@ -267,7 +268,6 @@ Uzasadnienia (do README):
   liczby dają poprawne porównania i prostą arytmetykę (`now + lease`,
   backoff, progi retencji) bez parsowania. Podgląd w CLI:
   `datetime(col/1000, 'unixepoch')`.
-- **`payload_hash` jako `BLOB`** — 32 B zamiast 64 znaków hex.
 - **`status` jako `TEXT` + `CHECK`** — świadomie: czytelność dla operatora w
   `sqlite3` ważniejsza niż kilka bajtów enuma liczbowego.
 - **JSON jako `TEXT`** — funkcje JSON w SQLite 3.40 działają na TEXT.
@@ -398,14 +398,14 @@ propozycja]:
 | Dane | Domyślnie | Co się dzieje |
 |---|---|---|
 | `payload_json` i `result_json` zdarzeń `completed` | 7 dni od `finished_at` | ustawiane na `NULL` |
-| cały wiersz `completed` (klucz + hash + status) | 30 dni od `finished_at` | wiersz usuwany |
+| cały wiersz `completed` (klucz + status) | 30 dni od `finished_at` | wiersz usuwany |
 | cały wiersz `failed` (z payloadem — do diagnozy) | 30 dni od `finished_at` | wiersz usuwany |
 
 Zdarzenia niezakończone nigdy nie są usuwane.
 
 Konsekwencje (opisane w README): okno retencji klucza = okno ochrony przed
 duplikatami. Duplikat po wyczyszczeniu payloadu nadal jest rozpoznawany
-(hash zostaje), dostaje status bez wyniku (`payload_purged: true`). Po
+(klucz zostaje), dostaje status bez wyniku (`payload_purged: true`). Po
 usunięciu wiersza ten sam klucz zostanie potraktowany jak nowe zdarzenie.
 Payload trzymamy krócej, bo może zawierać dane osobowe (e-mail, imię i
 nazwisko w przykładach).
@@ -429,7 +429,7 @@ zapisu na długo.
     od `POST` przez wszystkie próby.
   - Atrybuty spanów nie zawierają payloadu (dane osobowe).
 - **Metryki** (OTel SDK, eksport Prometheus na `/metrics`):
-  - `webhooks_received_total{source, outcome=accepted|duplicate|conflict|rate_limited|backpressure|invalid}`
+  - `webhooks_received_total{source, outcome=accepted|duplicate|rate_limited|backpressure|invalid}`
   - `webhook_processing_duration_seconds` (histogram), `{outcome}`
   - `webhook_attempts_total{outcome=success|retry|failed}`
   - `webhook_queue_depth{status}` (gauge odczytywany z bazy)
@@ -445,7 +445,7 @@ zapisu na długo.
     `/metrics` workera.
 - **Logi:** strukturalny JSON na stdout, w każdym wpisie `trace_id`,
   `span_id`, `idempotency_key`, `source`; zdarzenia: przyjęcie, duplikat,
-  konflikt, claim, wynik próby, odzyskanie rezerwacji, retencja.
+  claim, wynik próby, odzyskanie rezerwacji, retencja.
 - **Eksport:** domyślnie konsola (span exporter do stdout) — działa bez
   infrastruktury [ustalone]. Ustawienie `OTEL_EXPORTER_OTLP_ENDPOINT`
   przełącza na OTLP. `docker compose` zawiera Jaeger all-in-one (UI
@@ -515,7 +515,7 @@ tabela przepustowości dla N = 1, 2, 3, wynik kryteriów (PASS/FAIL). Wyniki
 
 pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 
-- repozytorium: zapis nowego / duplikat / konflikt; atomowy claim (dwóch
+- repozytorium: zapis nowego / duplikat (także z inną treścią); atomowy claim (dwóch
   konkurentów nie dostaje tego samego wiersza); warunkowy zapis wyniku po
   wygaśnięciu rezerwacji; odzyskiwanie rezerwacji; przejścia statusów i
   wyczerpanie prób;
@@ -599,7 +599,8 @@ widoczny jako badge w README [decyzja projektanta].
 - Szczegóły skryptu testu obciążeniowego i formatu raportu.
 - Treść sekcji TODO w README (minimum: HMAC, współdzielony rate limit,
   pełny stos obserwowalności, PostgreSQL/broker, narzędzie migracji,
-  endpoint do ręcznego ponowienia `failed`, dead-letter/alerty).
+  endpoint do ręcznego ponowienia `failed`, dead-letter/alerty,
+  wykrywanie niezgodności treści przy ponowieniu z tym samym kluczem).
   Obowiązkowo także punkt [ustalone]: **doprecyzować z nadawcami format
   `idempotency_key`** (zestaw znaków, długość, struktura) i na tej podstawie
   dobrać najlepsze rozwiązanie — obecne (dowolny string + kodowanie

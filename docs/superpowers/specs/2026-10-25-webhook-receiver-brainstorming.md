@@ -320,3 +320,20 @@ linter warunkiem ukończenia każdego zadania.
 Pytanie: gdzie egzekwować — tylko w procesie wytwarzania czy także w
 GitHub Actions? **Decyzja: dodajemy też GitHub Actions** (lint + pytest +
 `docker build`; test obciążeniowy poza CI).
+
+## 16. Duplikaty — ta sama czy różna treść?
+
+Pytanie użytkownika: czy z zadania wynika, że ten sam `idempotency_key` z
+tą samą / inną treścią trzeba obsługiwać różnie?
+
+Odpowiedź: nie — zadanie mówi tylko, że duplikat rozpoznajemy po
+`idempotency_key` i zwracamy istniejący status. Rozróżnienie treści
+(`409`) było dodatkiem projektanta z sekcji 4; jego koszt: `payload_hash`,
+kanonizacja JSON, dodatkowa ścieżka API i testy. Przedstawione opcje:
+zostawić `409` (rekomendacja), dosłownie wg zadania, wariant pośredni
+(`200` + metryka niezgodności).
+
+**Decyzja: dosłownie wg zadania** — duplikat = ten sam klucz, zawsze `200`
+z istniejącym statusem. Usunięte: `409`, `payload_hash`, kanonizacja,
+outcome `conflict`. Kompromis opisany w README; wykrywanie niezgodności
+treści → TODO. (Zastępuje decyzję z sekcji 4.)
