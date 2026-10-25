@@ -41,11 +41,12 @@ PR**:
 5. Świeży subagent-recenzent czyta diff PR, zadanie z planu i spec; uwagi
    wracają do implementera (kolejne commity na tej samej gałęzi) aż do
    akceptacji. Podsumowanie recenzji jako komentarz w PR (`gh pr comment`).
-6. Merge po zielonym CI i akceptacji recenzenta: `gh pr merge --squash
-   --delete-branch` — jeden commit na zadanie w `main`, z tytułem PR i
-   linią `Co-Authored-By`. Merge wykonuje koordynator; użytkownik może w
-   każdej chwili przejrzeć otwarty PR i wstrzymać merge.
-7. `git checkout main && git pull`, następne zadanie.
+6. **Merge wykonuje wyłącznie użytkownik**, po własnej weryfikacji kodu
+   [ustalone]. Koordynator nigdy nie merguje ani nie zamyka PR — po
+   zielonym CI i akceptacji recenzenta zgłasza gotowość PR i czeka.
+   Zalecany squash merge (jeden commit na zadanie w `main`).
+7. Po merge przez użytkownika: `git checkout main && git pull`, następne
+   zadanie od aktualnego `main`.
 
 Wyjątki: **Task 0** — po merge STOP na przebudowę devcontainera przez
 użytkownika i weryfikację środowiska przed Task 1. **Task 13–15** —
@@ -85,8 +86,8 @@ gałęzi; tytuł PR ma postać `Task NN: <tytuł zadania>`.
 - Język: identyfikatory, komentarze i komunikaty w kodzie po angielsku;
   README po polsku [decyzja planu].
 - Każde zadanie = gałąź `task/NN-…` + PR + zielone CI + akceptacja
-  recenzenta + squash merge (sekcja „Sposób wykonania”); nic nie trafia
-  prosto do `main`.
+  recenzenta; **merge robi wyłącznie użytkownik** (sekcja „Sposób
+  wykonania”); kod nie trafia prosto do `main`.
 - Commity kończą się linią
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; opis PR
   kończy się linią
@@ -173,8 +174,7 @@ Dodaj `16686` do `forwardPorts` (UI Jaegera).
 
 - [ ] **Step 2: Commit na gałęzi `task/00-devcontainer` i PR**
   (`chore: devcontainer on Python 3.14 trixie with docker-in-docker`);
-  merge wg „Sposobu wykonania”. CI jeszcze nie istnieje — warunkiem merge
-  jest akceptacja recenzenta.
+  PR wg „Sposobu wykonania”. CI jeszcze nie istnieje.
 
 - [ ] **Step 3: STOP — przebudowa przez użytkownika**
 

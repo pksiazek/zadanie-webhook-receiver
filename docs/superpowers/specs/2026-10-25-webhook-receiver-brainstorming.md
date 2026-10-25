@@ -510,3 +510,10 @@ wymagane CI, wymagane zatwierdzenie (niemożliwe przy jednym koncie).
 na gałęzi domyślnej, bez wyjątków (obowiązuje też administratorów). Drobne
 zmiany w dokumentacji mogą nadal trafiać prosto do `main`; zadania z planu
 idą przez PR zgodnie z sekcją „Sposób wykonania”.
+
+## 29. Merge PR tylko przez użytkownika
+
+Po merge PR #1 (Task 0) przez koordynatora użytkownik zastrzegł: **nie
+zamykać PR samodzielnie — merge robi użytkownik po zweryfikowaniu kodu.**
+Koordynator: PR + zielone CI + recenzja z komentarzem, potem czeka na merge
+przez użytkownika; kolejne zadanie od zaktualizowanego `main`.
