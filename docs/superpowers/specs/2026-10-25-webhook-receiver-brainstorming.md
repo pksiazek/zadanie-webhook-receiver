@@ -306,3 +306,17 @@ oczekiwane ≈ 340/690/1030 na min; kryterium ≥ 85% liniowości.
 
 **Decyzja: domyślna konfiguracja compose i scenariusze `steady`/`burst`
 na 3×20; scenariusz `scaling` zaakceptowany.**
+
+## 15. Linter i CI
+
+Uwaga użytkownika: o PEP 8 jest tylko krótka wzmianka — warto dodać twarde
+wymaganie lintera.
+
+Propozycja (zaakceptowana): ruff z regułami `E`, `W`, `N`, `F`, `I`, `B`,
+`UP`; długość linii 79 (dosłownie PEP 8); `ruff check` + `ruff format
+--check` bez błędów dla kodu, testów i skryptu obciążeniowego; zielony
+linter warunkiem ukończenia każdego zadania.
+
+Pytanie: gdzie egzekwować — tylko w procesie wytwarzania czy także w
+GitHub Actions? **Decyzja: dodajemy też GitHub Actions** (lint + pytest +
+`docker build`; test obciążeniowy poza CI).

@@ -529,7 +529,8 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
 
 ## 15. Dostarczane artefakty
 
-- Kod (pakiet Pythona, `pyproject.toml`, ruff do formatowania/lintu).
+- Kod (pakiet Pythona, `pyproject.toml`, konfiguracja ruff — §15a).
+- `.github/workflows/ci.yml` — lint, testy, build obrazu (§15a).
 - `Dockerfile` (jeden obraz, dwie komendy: `api` i `worker`).
 - `docker-compose.yml`: `api`, `worker`, `jaeger`; nazwany wolumen z plikiem
   bazy; healthcheck API na `/ready`; healthcheck workera na jego `/health`
@@ -551,6 +552,32 @@ pytest; TDD w trakcie implementacji [ustalone]. Kluczowe obszary:
   - Semantykę „dokładnie raz” (§4), dwuprogową retencję (§11), jeden
     proces uvicorn (§3), granicę jednego hosta (§16).
 - Ten dokument i zapis brainstormingu w `docs/superpowers/specs/`.
+
+## 15a. Jakość kodu i CI
+
+**PEP 8 jako twarde wymaganie, egzekwowane linterem** [ustalone]:
+
+- Narzędzie: **ruff** (lint + formatowanie; już w devcontainerze).
+- Reguły w `pyproject.toml`: `E`, `W` (pycodestyle — PEP 8), `N`
+  (pep8-naming), `F` (pyflakes), `I` (kolejność importów), `B`
+  (bugbear), `UP` (składnia Pythona 3.12).
+- **Długość linii 79** — dosłownie wg PEP 8 (zamiast domyślnych 88 w ruff).
+- `ruff check` i `ruff format --check` muszą przechodzić bez błędów dla
+  całego kodu: aplikacji, testów i skryptu obciążeniowego. `# noqa` tylko z
+  komentarzem uzasadniającym.
+- Zielony linter jest warunkiem ukończenia **każdego** zadania w planie
+  implementacji.
+
+**GitHub Actions** [ustalone]: workflow uruchamiany przy każdym pushu i
+pull requeście, z krokami:
+
+1. `ruff check` i `ruff format --check`,
+2. `pytest` (testy jednostkowe i integracyjne z krótkim czasem symulacji),
+3. `docker build` obrazu — weryfikuje Dockerfile [decyzja projektanta].
+
+Test obciążeniowy nie jest częścią CI (trwa kilkanaście minut i zależy od
+sprzętu) — uruchamiany ręcznie, wyniki w README. Status workflow
+widoczny jako badge w README [decyzja projektanta].
 
 ## 16. Założenia skalowalności (do README)
 
