@@ -501,3 +501,12 @@ CI, akceptacja subagenta-recenzenta z komentarzem w PR, squash merge
 wykonywany przez koordynatora); wykonanie przez subagentów koordynowanych
 z tej sesji, po kolei. Ochrona gałęzi `main` w ustawieniach GitHuba nie jest
 włączana (można zaproponować osobno).
+
+## 28. Ochrona gałęzi main
+
+Omówione reguły: blokada usunięcia, blokada force push, wymagany PR,
+wymagane CI, wymagane zatwierdzenie (niemożliwe przy jednym koncie).
+**Decyzja: tylko blokada usunięcia i force push** — ruleset `protect-main`
+na gałęzi domyślnej, bez wyjątków (obowiązuje też administratorów). Drobne
+zmiany w dokumentacji mogą nadal trafiać prosto do `main`; zadania z planu
+idą przez PR zgodnie z sekcją „Sposób wykonania”.
