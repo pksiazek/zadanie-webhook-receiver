@@ -1,5 +1,7 @@
 import threading
 
+import pytest
+
 from webhook_receiver.common.db import ConnectionPool, init_schema
 from webhook_receiver.common.models import RecoveryResult, Status
 from webhook_receiver.common.repository import (
@@ -17,17 +19,27 @@ def _add(repo, key, payload=None):
     return ev
 
 
-def test_claim_takes_due_in_run_at_order_and_increments_attempts(repo, clock):
-    for key in ("a", "b", "c"):
-        _add(repo, key)
-        clock.advance(10)
-    claimed = repo.claim(2, LEASE)
-    assert [e.idempotency_key for e in claimed] == ["a", "b"]
-    for ev in claimed:
-        assert ev.status is Status.PROCESSING
-        assert ev.attempts == 1
-        assert ev.run_at == clock.now_ms() + LEASE
-    assert repo.get("c").status is Status.PENDING
+def test_claim_selects_by_run_at_and_increments_attempts(repo, clock):
+    _add(repo, "old")
+    (old,) = repo.claim(1, LEASE)
+    # Older event, but retried later than the newer one is due.
+    assert repo.record_failure(old.id, 1, "boom", clock.now_ms() + 1_000)
+    clock.advance(10)
+    _add(repo, "new")
+    clock.advance(2_000)
+    (first,) = repo.claim(1, LEASE)
+    assert first.idempotency_key == "new"
+    assert first.status is Status.PROCESSING
+    assert first.attempts == 1
+    assert first.run_at == clock.now_ms() + LEASE
+    (second,) = repo.claim(1, LEASE)
+    assert second.idempotency_key == "old" and second.attempts == 2
+
+
+def test_claim_rejects_non_positive_arguments(repo):
+    for limit, lease in ((0, LEASE), (-1, LEASE), (1, 0), (1, -5)):
+        with pytest.raises(ValueError):
+            repo.claim(limit, lease)
 
 
 def test_claim_skips_not_yet_due_retrying(repo, clock):
@@ -101,11 +113,16 @@ def test_complete_rejected_for_stale_attempt(repo, clock):
     assert repo.complete(first.id, 2, {"ok": True}) is True
 
 
-def test_record_failure_stale_attempt_rejected(repo):
+def test_record_failure_rejected_for_stale_attempt(repo, clock):
     _add(repo, "a")
-    (ev,) = repo.claim(1, LEASE)
-    assert repo.record_failure(ev.id, 99, "x", None) is False
-    assert repo.get("a").status is Status.PROCESSING
+    (first,) = repo.claim(1, LEASE)
+    clock.advance(LEASE)
+    repo.recover_expired(5)
+    (second,) = repo.claim(1, LEASE)
+    assert second.attempts == 2
+    before = repo.get("a")
+    assert repo.record_failure(first.id, 1, "late", None) is False
+    assert repo.get("a") == before
 
 
 def test_record_failure_schedules_retry(repo, clock):
@@ -153,6 +170,30 @@ def test_recover_expired_at_max_attempts_fails(repo, clock):
     assert got.status is Status.FAILED
     assert got.finished_at == clock.now_ms()
     assert got.last_error == "lease expired"
+
+
+def test_recover_expired_mixed_batch(repo, clock):
+    _add(repo, "low")
+    (low,) = repo.claim(1, LEASE)
+    repo.record_failure(low.id, 1, "x", clock.now_ms())
+    (low,) = repo.claim(1, LEASE)  # attempts == 2
+    _add(repo, "high")
+    (high,) = repo.claim(1, LEASE)  # attempts == 1
+    assert (low.attempts, high.attempts) == (2, 1)
+    clock.advance(LEASE)
+    assert repo.recover_expired(2) == RecoveryResult(retried=1, failed=1)
+    assert repo.get("high").status is Status.RETRYING
+    assert repo.get("low").status is Status.FAILED
+
+
+def test_recover_expired_lease_boundary(repo, clock):
+    _add(repo, "a")
+    repo.claim(1, LEASE)
+    clock.advance(LEASE - 1)
+    assert repo.recover_expired(5) == RecoveryResult(0, 0)
+    assert repo.get("a").status is Status.PROCESSING
+    clock.advance(1)
+    assert repo.recover_expired(5) == RecoveryResult(1, 0)
 
 
 def test_queue_queries_use_partial_indexes(repo):

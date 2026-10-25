@@ -98,6 +98,9 @@ class EventRepository:
 
     def claim(self, limit: int, lease_ms: int) -> list[Event]:
         """Atomically reserve up to `limit` due events for processing."""
+        if limit <= 0 or lease_ms <= 0:
+            # A negative SQLite LIMIT means "no limit".
+            raise ValueError("limit and lease_ms must be positive")
         now = self._clock.now_ms()
         conn = self._pool.get()
         with immediate(conn):
@@ -105,6 +108,9 @@ class EventRepository:
                 CLAIM_SQL, {"now": now, "lease": lease_ms, "limit": limit}
             ).fetchall()
         events = [_row_to_event(r) for r in rows]
+        # RETURNING order is unspecified. Within a batch order is not
+        # significant (all rows share run_at = now + lease); this is just
+        # a stable tie-break.
         events.sort(key=lambda e: (e.created_at, e.id))
         return events
 
