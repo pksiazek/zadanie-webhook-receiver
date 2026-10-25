@@ -373,8 +373,12 @@ projektanta, po recenzji]:
   ponawiamy.
 - Połączenie **per wątek** (`threading.local`): endpointy FastAPI `def`
   działają w puli wątków, a worker wykonuje operacje bazy przez
-  `asyncio.to_thread`. Bez współdzielenia połączeń między wątkami (bez
-  `check_same_thread=False`).
+  `asyncio.to_thread`. Bez współdzielenia połączeń między wątkami:
+  `connect()` domyślnie zostawia ochronę `check_same_thread=True`; jedynie
+  `ConnectionPool` tworzy połączenia z `check_same_thread=False`, bo
+  `close_all()` przy zamykaniu procesu zamyka połączenia utworzone w innych
+  wątkach. Pula wydaje połączenie wyłącznie wątkowi, który je utworzył
+  (`threading.local`) [rozstrzygnięcie z recenzji Task 2].
 
 Migracje: idempotentny skrypt `CREATE … IF NOT EXISTS` wykonywany przy
 starcie każdego procesu, w `BEGIN IMMEDIATE` z `busy_timeout` (kilka

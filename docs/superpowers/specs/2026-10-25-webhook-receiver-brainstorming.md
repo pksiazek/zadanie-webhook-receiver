@@ -528,3 +528,10 @@ z cache, devcontainer instaluje uv (wolumen na cache, interpreter z
 `.venv`), Dockerfile z uv i cache mount, job `docker` z cache warstw
 `type=gha`. Wprowadzone w PR #3 (runda poprawek 2 Task 1); instalacja w
 CI ~1 s.
+
+## 31. Rozstrzygnięcie: `check_same_thread` (recenzja Task 2)
+
+Implementer użył `check_same_thread=False` dla wszystkich połączeń, żeby
+`ConnectionPool.close_all()` mógł zamknąć połączenia innych wątków; spec
+zabraniał. **Rozstrzygnięcie koordynatora:** flaga tylko w puli, `connect()`
+domyślnie z ochroną; spec §7 zaktualizowany.
