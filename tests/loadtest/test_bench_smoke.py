@@ -94,6 +94,11 @@ def test_run_writers_fails_fast_when_a_writer_dies(tmp_path):
 
 
 def test_run_writers_reports_every_writer(tmp_path):
-    reports = run_writers(fresh_db(tmp_path, "ok"), 2, 0.2)
+    reports = run_writers(fresh_db(tmp_path, "ok"), 2, 0.5)
     assert sorted(r.writer_id for r in reports) == [0, 1]
-    assert all(r.count > 0 and r.end > r.start for r in reports)
+    # The SQLite write lock is unfair: a starved writer may commit
+    # nothing in the window (its one attempt ends late or as BUSY), so
+    # only the total must be positive; every writer finished an attempt.
+    assert sum(r.count for r in reports) > 0
+    assert all(r.count + r.late + r.busy > 0 for r in reports)
+    assert all(r.end > r.start for r in reports)
