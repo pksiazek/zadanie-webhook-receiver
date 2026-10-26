@@ -5,6 +5,7 @@ process, so setup and metric instruments are process-wide singletons.
 Nothing here ever receives or records an event payload.
 """
 
+import logging
 import os
 import socket
 import sys
@@ -37,17 +38,35 @@ _SCOPE = "webhook_receiver"
 # millisecond-oriented (0 .. 10000).
 _DURATION_BUCKETS_S = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 
+_log = logging.getLogger("webhook_receiver.telemetry")
 _lock = threading.Lock()
 _configured = False
 _propagator = TraceContextTextMapPropagator()
 
 
 def _span_processor(exporter: SpanExporter | None) -> SpanProcessor | None:
+    """Pick the span processor; precedence, highest first:
+
+    1. an exporter passed in (tests) -> ``SimpleSpanProcessor``;
+    2. ``OTEL_TRACES_EXPORTER=none`` -> no export at all;
+    3. ``OTEL_TRACES_EXPORTER=otlp`` or ``console`` -> that exporter
+       (OTLP without an endpoint uses the library default endpoint);
+    4. ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` or
+       ``OTEL_EXPORTER_OTLP_ENDPOINT`` set -> OTLP over HTTP;
+    5. otherwise the console exporter on stderr.
+    """
     if exporter is not None:
         return SimpleSpanProcessor(exporter)
-    if os.environ.get("OTEL_TRACES_EXPORTER", "").lower() == "none":
+    choice = os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower()
+    if choice == "none":
         return None
-    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+    if choice not in ("otlp", "console"):
+        has_endpoint = bool(
+            os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        )
+        choice = "otlp" if has_endpoint else "console"
+    if choice == "otlp":
         # Imported lazily: only needed when OTLP is configured.
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
@@ -117,6 +136,7 @@ class _ApiInstruments:
 
     def __init__(self) -> None:
         self.stats: Callable[[], QueueStats] | None = None
+        self.stats_failing = False
         meter = get_meter()
         self.received = meter.create_counter(
             "webhooks_received", description="Incoming webhook requests"
@@ -133,10 +153,28 @@ class _ApiInstruments:
             description="Age of the oldest due, unclaimed work",
         )
 
-    def _depth(self, _options: CallbackOptions) -> Iterable[Observation]:
+    def _read_stats(self) -> QueueStats | None:
+        """Current stats, or None; a failure is logged once per outage.
+
+        The callbacks run on every scrape (~1/s), so letting the SDK log
+        each exception would flood the logs.
+        """
         if self.stats is None:
+            return None
+        try:
+            stats = self.stats()
+        except Exception as exc:
+            if not self.stats_failing:
+                self.stats_failing = True
+                _log.warning("queue stats unavailable: %s", exc)
+            return None
+        self.stats_failing = False
+        return stats
+
+    def _depth(self, _options: CallbackOptions) -> Iterable[Observation]:
+        stats = self._read_stats()
+        if stats is None:
             return []
-        stats = self.stats()
         return [
             Observation(stats.pending, {"status": "pending"}),
             Observation(stats.retrying, {"status": "retrying"}),
@@ -144,9 +182,10 @@ class _ApiInstruments:
         ]
 
     def _oldest_age(self, _options: CallbackOptions) -> Iterable[Observation]:
-        if self.stats is None:
+        stats = self._read_stats()
+        if stats is None:
             return []
-        return [Observation(self.stats().oldest_due_age_ms / 1000)]
+        return [Observation(stats.oldest_due_age_ms / 1000)]
 
 
 class _WorkerInstruments:
@@ -201,6 +240,7 @@ class ApiMetrics:
     def __init__(self, stats: Callable[[], QueueStats]) -> None:
         self._instruments = _get_api_instruments()
         self._instruments.stats = stats
+        self._instruments.stats_failing = False
 
     def received(self, source: str, outcome: str) -> None:
         self._instruments.received.add(

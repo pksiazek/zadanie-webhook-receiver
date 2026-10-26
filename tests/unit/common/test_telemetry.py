@@ -165,9 +165,20 @@ def test_metrics_payload_content_type():
 
 @pytest.fixture
 def clean_otel_env(monkeypatch):
-    monkeypatch.delenv("OTEL_TRACES_EXPORTER", raising=False)
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    for name in (
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
     return monkeypatch
+
+
+def _exporter_of(processor):
+    assert isinstance(processor, BatchSpanProcessor)
+    exporter = processor.span_exporter
+    processor.shutdown()
+    return exporter
 
 
 def test_span_processor_uses_given_exporter(clean_otel_env):
@@ -207,3 +218,60 @@ def test_gauges_report_nothing_before_stats_source(monkeypatch):
     text = _metrics_text()
     assert "webhook_queue_depth{" not in text
     assert "webhook_queue_oldest_pending_age_seconds " not in text
+
+
+def test_span_processor_otlp_when_traces_endpoint_set(clean_otel_env):
+    clean_otel_env.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://x:4318/v1/traces"
+    )
+    exporter = _exporter_of(telemetry._span_processor(None))
+    assert isinstance(exporter, OTLPSpanExporter)
+
+
+def test_span_processor_explicit_otlp_without_endpoint(clean_otel_env):
+    clean_otel_env.setenv("OTEL_TRACES_EXPORTER", "otlp")
+    exporter = _exporter_of(telemetry._span_processor(None))
+    assert isinstance(exporter, OTLPSpanExporter)
+
+
+def test_span_processor_explicit_console_beats_endpoint(clean_otel_env):
+    clean_otel_env.setenv("OTEL_TRACES_EXPORTER", "console")
+    clean_otel_env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://x:4318")
+    exporter = _exporter_of(telemetry._span_processor(None))
+    assert isinstance(exporter, ConsoleSpanExporter)
+    assert exporter.out is sys.stderr
+
+
+def test_failing_stats_source_warns_once(caplog):
+    def broken() -> QueueStats:
+        raise RuntimeError("cache gone")
+
+    ApiMetrics(broken)
+    with caplog.at_level("WARNING"):
+        first = _metrics_text()
+        second = _metrics_text()
+    for text in (first, second):
+        assert "webhook_queue_depth{" not in text
+        assert "webhook_queue_oldest_pending_age_seconds " not in text
+    ours = [
+        r for r in caplog.records if r.name == "webhook_receiver.telemetry"
+    ]
+    assert len(ours) == 1
+    assert "cache gone" in ours[0].getMessage()
+    assert all(r.name == "webhook_receiver.telemetry" for r in caplog.records)
+
+
+def test_recovered_stats_source_reports_again(caplog):
+    calls = {"n": 0}
+
+    def flaky() -> QueueStats:
+        calls["n"] += 1
+        if calls["n"] <= 2:  # both gauges fail on the first scrape
+            raise RuntimeError("cache gone")
+        return QueueStats(5, 0, 0, 0)
+
+    ApiMetrics(flaky)
+    with caplog.at_level("WARNING"):
+        _metrics_text()
+        text = _metrics_text()
+    assert 'webhook_queue_depth{status="pending"} 5.0' in text

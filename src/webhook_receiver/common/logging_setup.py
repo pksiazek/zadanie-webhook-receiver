@@ -14,7 +14,30 @@ _RESERVED = frozenset(
 ) | {"message", "asctime"}
 
 
+# Event bodies may hold personal data and must never reach the logs.
+_REDACTED_KEYS = frozenset({"payload", "payload_json", "body", "result_json"})
+_REDACTED = "[redacted]"
+
+
+def _serializable(value: Any) -> Any:
+    """The value if JSON can encode it, otherwise its ``repr``."""
+    try:
+        json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError, ValueError, RecursionError:
+        return repr(value)
+    return value
+
+
 class JsonFormatter(logging.Formatter):
+    """One JSON object per record, correlated with the current span.
+
+    Fields from ``extra`` are copied as-is, except keys in
+    ``_REDACTED_KEYS`` (``payload``, ``payload_json``, ``body``,
+    ``result_json``), whose values are replaced with ``"[redacted]"``.
+    A value JSON cannot encode (e.g. a circular structure) is logged as
+    its ``repr`` so the rest of the line survives.
+    """
+
     def format(self, record: logging.LogRecord) -> str:
         ctx = trace.get_current_span().get_span_context()
         entry: dict[str, Any] = {
@@ -30,10 +53,16 @@ class JsonFormatter(logging.Formatter):
             ),
         }
         for key, value in vars(record).items():
-            if key not in _RESERVED and key not in entry:
-                entry[key] = value
+            if key in _RESERVED or key in entry:
+                continue
+            if key in _REDACTED_KEYS:
+                entry[key] = _REDACTED
+            else:
+                entry[key] = _serializable(value)
         if record.exc_info:
             entry["exc"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            entry["stack"] = self.formatStack(record.stack_info)
         return json.dumps(entry, ensure_ascii=False, default=str)
 
 

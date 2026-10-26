@@ -83,3 +83,30 @@ def test_exception_is_serialized(capsys, log):
         log.exception("failed")
     (entry,), _ = _lines(capsys)
     assert "ValueError: boom" in entry["exc"]
+
+
+@pytest.mark.parametrize(
+    "key", ["payload", "payload_json", "body", "result_json"]
+)
+def test_payload_like_extra_is_redacted(capsys, log, key):
+    log.info("saved", extra={key: {"email": "a@b.c"}, "source": "shop"})
+    (entry,), _ = _lines(capsys)
+    assert entry[key] == "[redacted]"
+    assert entry["source"] == "shop"
+    assert "a@b.c" not in json.dumps(entry)
+
+
+def test_unserializable_extra_keeps_the_line(capsys, log):
+    loop: list = []
+    loop.append(loop)
+    log.info("odd", extra={"loop": loop, "source": "shop"})
+    (entry,), _ = _lines(capsys)
+    assert entry["message"] == "odd"
+    assert entry["source"] == "shop"
+    assert entry["loop"] == repr(loop)
+
+
+def test_stack_info_is_included(capsys, log):
+    log.info("where", stack_info=True)
+    (entry,), _ = _lines(capsys)
+    assert entry["stack"].startswith("Stack (most recent call last)")
