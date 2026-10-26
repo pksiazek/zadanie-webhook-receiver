@@ -117,9 +117,12 @@ def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, open_db):
             "SELECT name FROM sqlite_master WHERE type = 'index'"
         )
     }
-    assert {"ix_events_ready", "ix_events_leased", "ix_events_finished"} <= (
-        names
-    )
+    assert {
+        "ix_events_ready",
+        "ix_events_leased",
+        "ix_events_finished",
+        "ix_events_purgeable",
+    } <= names
     sql = {
         r["name"]: " ".join(r["sql"].split())
         for r in conn.execute(
@@ -132,6 +135,9 @@ def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, open_db):
     )
     assert sql["ix_events_leased"].endswith("WHERE status = 'processing'")
     assert sql["ix_events_finished"].endswith("WHERE finished_at IS NOT NULL")
+    assert sql["ix_events_purgeable"].endswith(
+        "(finished_at) WHERE status = 'completed' AND payload_json IS NOT NULL"
+    )
 
 
 def test_init_schema_concurrent(tmp_path, open_db):

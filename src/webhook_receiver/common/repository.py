@@ -48,15 +48,19 @@ OLDEST_LEASED_SQL = (
     "SELECT MIN(run_at) FROM webhook_events"
     " WHERE status = 'processing' AND run_at <= :now"
 )
-# Retention: `finished_at IS NOT NULL` matches ix_events_finished; batches
+# Retention: `finished_at IS NOT NULL` matches ix_events_finished; the
+# payload purge matches ix_events_purgeable, which holds only rows that
+# still have a payload, so already-purged rows are never rescanned. Without
+# ANALYZE statistics the planner prefers ix_events_finished (status=?), so
+# INDEXED BY pins the choice. Batches
 # use `id IN (SELECT ... LIMIT)` because `UPDATE/DELETE ... LIMIT` needs a
 # compile-time option missing from many SQLite builds.
 PURGE_PAYLOAD_SQL = (
     "UPDATE webhook_events SET payload_json = NULL, result_json = NULL"
     " WHERE id IN (SELECT id FROM webhook_events"
-    " WHERE status = 'completed' AND finished_at IS NOT NULL"
-    " AND finished_at < :cutoff AND payload_json IS NOT NULL"
-    " LIMIT :limit)"
+    " INDEXED BY ix_events_purgeable"
+    " WHERE status = 'completed' AND payload_json IS NOT NULL"
+    " AND finished_at < :cutoff LIMIT :limit)"
 )
 PURGE_COMPLETED_SQL = (
     "DELETE FROM webhook_events WHERE id IN (SELECT id FROM webhook_events"

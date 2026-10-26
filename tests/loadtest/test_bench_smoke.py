@@ -23,6 +23,8 @@ def test_benchmarks_smoke(tmp_path, capsys):
         assert bench in out
     assert "FULL" in out and "NORMAL" in out
     assert "ix_events_ready" in out  # EXPLAIN QUERY PLAN of the claim
+    assert "already purged" in out
+    assert "ix_events_purgeable" in out  # payload purge plan
 
 
 def test_single_subcommand(tmp_path, capsys):

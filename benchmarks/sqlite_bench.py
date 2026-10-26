@@ -85,6 +85,7 @@ class Sizes:
     contention_seconds: float
     retention_eligible: int
     retention_other: int
+    retention_purged: int
 
 
 FULL = Sizes(
@@ -96,6 +97,7 @@ FULL = Sizes(
     contention_seconds=10.0,
     retention_eligible=10_000,
     retention_other=100_000,
+    retention_purged=100_000,
 )
 QUICK = Sizes(
     sync_inserts=100,
@@ -106,6 +108,7 @@ QUICK = Sizes(
     contention_seconds=0.5,
     retention_eligible=2_000,
     retention_other=1_000,
+    retention_purged=1_000,
 )
 
 
@@ -648,6 +651,43 @@ def _populate_retention(conn: sqlite3.Connection, sizes: Sizes) -> int:
     return now
 
 
+def _populate_purged(conn: sqlite3.Connection, sizes: Sizes) -> int:
+    """Eligible payloads among many rows whose payload is already gone.
+
+    Every completed row spends days 7-30 in this state, so after a week
+    of traffic it is the normal shape of the table.
+    """
+    now = SystemClock().now_ms()
+    purged = now - 10 * DAY_MS  # between the 7 d and the 30 d cutoff
+    bulk_insert(
+        conn, "purged", sizes.retention_purged, "completed", purged, purged, 1
+    )
+    with immediate(conn):
+        conn.execute("UPDATE webhook_events SET payload_json = NULL")
+    eligible = now - 8 * DAY_MS
+    bulk_insert(
+        conn, "old", sizes.retention_eligible, "completed", eligible,
+        eligible, 1,
+    )  # fmt: skip
+    conn.execute("ANALYZE")
+    return now
+
+
+def _payload_batches(
+    conn: sqlite3.Connection, params: dict
+) -> tuple[list[float], float]:
+    """Time each payload batch; returns (changing ones, final empty one)."""
+    samples: list[float] = []
+    while True:
+        start = time.perf_counter()
+        with immediate(conn):
+            changed = conn.execute(PURGE_PAYLOAD_SQL, params).rowcount
+        elapsed = time.perf_counter() - start
+        if changed == 0:
+            return samples, elapsed
+        samples.append(elapsed)
+
+
 def bench_retention(
     base: Path, repeat: int, sizes: Sizes
 ) -> tuple[list[Result], list[str]]:
@@ -656,11 +696,15 @@ def bench_retention(
     Batches execute the repository's own SQL once each under
     ``immediate()`` (exactly what ``purge`` does per batch), so their
     duration is the write-lock hold time. Every eligible batch is
-    timed; then ``purge()`` runs on a freshly populated database.
+    timed; then ``purge()`` runs on a freshly populated database. A
+    third database repeats the payload batches with many already-purged
+    rows below the cutoff.
     """
     payload: list[float] = []
     delete: list[float] = []
     totals: list[float] = []
+    purged_batches: list[float] = []
+    purged_empty: list[float] = []
     plans: list[str] = []
     for rep in range(repeat):
         log(f"retention: run {rep + 1}/{repeat}")
@@ -711,9 +755,28 @@ def bench_retention(
                 raise RuntimeError(f"purge returned {purged}")
         finally:
             pool.close_all()
+
+        pool = ConnectionPool(fresh_db(base, "retention-purged"))
+        try:
+            conn = pool.get()
+            now = _populate_purged(conn, sizes)
+            params = {"cutoff": now - 7 * DAY_MS, "limit": BATCH}
+            if rep == 0:
+                plans.append(
+                    f"payload batch, {sizes.retention_purged} already"
+                    f" purged: {query_plan(conn, PURGE_PAYLOAD_SQL, params)}"
+                )
+            samples, empty = _payload_batches(conn, params)
+            purged_batches += samples
+            purged_empty.append(empty)
+        finally:
+            pool.close_all()
     eligible = sizes.retention_eligible
     other = sizes.retention_other
     shape = f"{eligible} eligible + {other} recent rows"
+    purged_shape = (
+        f"{eligible} eligible + {sizes.retention_purged} already purged rows"
+    )
     return [
         ms_result("retention", "payload clear batch 1000", payload, shape),
         ms_result("retention", "delete batch 1000", delete, shape),
@@ -722,6 +785,18 @@ def bench_retention(
             f"purge() {eligible} eligible",
             totals,
             f"{2 * eligible // BATCH} batches; {shape}",
+        ),
+        ms_result(
+            "retention",
+            "payload clear batch 1000, purged",
+            purged_batches,
+            purged_shape,
+        ),
+        ms_result(
+            "retention",
+            "payload empty batch, purged",
+            purged_empty,
+            f"last batch, nothing left to clear; {purged_shape}",
         ),
     ], plans
 

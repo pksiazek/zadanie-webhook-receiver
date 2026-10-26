@@ -34,6 +34,9 @@ CREATE INDEX IF NOT EXISTS ix_events_leased ON webhook_events (run_at)
 CREATE INDEX IF NOT EXISTS ix_events_finished
     ON webhook_events (status, finished_at)
     WHERE finished_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_events_purgeable
+    ON webhook_events (finished_at)
+    WHERE status = 'completed' AND payload_json IS NOT NULL;
 """
 
 
