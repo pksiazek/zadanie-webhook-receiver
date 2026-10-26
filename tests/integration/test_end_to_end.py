@@ -59,11 +59,13 @@ async def test_gist_examples_complete_end_to_end(tmp_path):
 
 
 async def test_duplicate_during_processing_not_reprocessed(tmp_path):
-    # Long enough processing to send the duplicate while it runs.
+    # Long enough processing to send the duplicate while it runs, with
+    # margin for a stalled CI runner (a ~1 s stall made 0.8 s flaky).
     settings = make_settings(
         tmp_path / "dup.db",
-        simulated_min_seconds=0.8,
-        simulated_max_seconds=1.0,
+        simulated_min_seconds=2.5,
+        simulated_max_seconds=3.0,
+        lease_seconds=6,
     )
     app = create_app(
         settings, extra_lifespan=embedded_worker_lifespan(settings)
