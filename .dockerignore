@@ -1,4 +1,4 @@
-# Build context needs only pyproject.toml, uv.lock and src/.
+# Build context needs only pyproject.toml, uv.lock, src/ and loadtest/.
 .git
 .gitignore
 .venv
@@ -23,3 +23,5 @@ htmlcov/
 Dockerfile
 .dockerignore
 docker-compose.yml
+results/
+scripts/

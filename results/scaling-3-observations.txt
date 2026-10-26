@@ -1,0 +1,10 @@
+# docker stats at flood+70s
+zadanie-webhook-receiver-api-1 cpu=0.94% mem=62.41MiB / 11.73GiB
+zadanie-webhook-receiver-jaeger-1 cpu=0.08% mem=29.87MiB / 11.73GiB
+zadanie-webhook-receiver-worker-1 cpu=1.39% mem=57.8MiB / 11.73GiB
+zadanie-webhook-receiver-worker-2 cpu=1.75% mem=57.55MiB / 11.73GiB
+zadanie-webhook-receiver-worker-3 cpu=10.85% mem=57.46MiB / 11.73GiB
+# worker log counts
+database is locked: 0
+worker turn failed: 0
+recovered expired leases: 0

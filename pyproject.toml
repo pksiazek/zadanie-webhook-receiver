@@ -36,7 +36,7 @@ packages = ["src/webhook_receiver"]
 [tool.ruff]
 line-length = 79
 target-version = "py314"
-src = ["src", "tests"]
+src = ["src", "tests", "."]
 # Plans and specs contain illustrative code snippets, not project code.
 extend-exclude = ["docs", ".superpowers"]
 
@@ -45,6 +45,7 @@ select = ["E", "W", "N", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 timeout = 60
 addopts = "--cov=webhook_receiver --cov-report=term-missing"

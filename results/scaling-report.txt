@@ -1,0 +1,5 @@
+workers  throughput/min  linear/min  linearity  result
+      1           342.3       342.3     100.0%  PASS
+      2           683.0       684.6      99.8%  PASS
+      3          1025.8      1026.9      99.9%  PASS
+scaling: PASS (every N >= 85% linear)

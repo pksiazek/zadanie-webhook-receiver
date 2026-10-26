@@ -1,0 +1,57 @@
+scenario: burst
+params: {"base_url": "http://api:8000", "sources": 5, "p99_ms": 100.0, "burst_rate": 3000.0, "burst_minutes": 2.0, "low_rate": 100.0, "low_until": 100.0, "low_limit": 600.0, "idle_limit": 120.0, "total_limit": 900.0}
+
+phase      duration_s  limit_s  end   requests   p50_ms   p95_ms   p99_ms   max_ms  max_lag_ms  codes
+1-burst         120.0      120  yes      6000      6.8     10.9     17.0     47.2        12.1  202:6000
+2-low           249.0      600  yes       416      9.7     14.4     20.0     30.7        12.7  202:416
+3-idle           12.0      120  yes         0        -        -        -        -         0.0  -
+all POST: n=6416 p50=6.9 ms p95=11.2 ms p99=17.1 ms max=47.2 ms
+note: generator scheduling lag up to 12.7 ms
+total duration: 381.0 s
+
+queue peak (pending+retrying): 3904 at t=121 s
+queue depth over time (every ~10 s):
+     t_s  pending  retrying  processing
+       0        0         0           0
+      11      313         0          60
+      22      678         0          60
+      33     1036         0          60
+      43     1361         0          60
+      54     1727         0          60
+      64     2048         0          60
+      75     2409         0          60
+      85     2742         0          60
+      96     3107         0          60
+     107     3471         0          60
+     117     3794         0          60
+     127     3806         0          60
+     138     3635         0          60
+     148     3477         0          60
+     158     3325         0          60
+     169     3154         0          60
+     179     2990         0          60
+     190     2834         0          60
+     200     2678         0          60
+     211     2509         0          59
+     222     2338         0          60
+     232     2187         0          60
+     242     2029         0          60
+     253     1881         0          60
+     263     1726         0          60
+     274     1558         0          60
+     285     1388         0          60
+     295     1239         0          60
+     306     1068         0          60
+     317      895         0          60
+     328      728         0          60
+     338      573         0          60
+     349      398         0          60
+     359      246         0          60
+     370       80         0          60
+     381        0         0           0
+
+completeness: sent=6416 completed=6416
+
+criteria: p99 POST < 100 ms,
+  zero non-2xx, phase limits, every key completed
+result: PASS

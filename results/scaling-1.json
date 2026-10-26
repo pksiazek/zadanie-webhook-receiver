@@ -1,0 +1,1 @@
+{"workers": 1, "throughput_per_min": 342.3, "valid": true, "count": 3000, "accepted": 3000, "retried_429": 0, "rejected_other": 0, "transport_errors": 0, "all_sent_after_s": 15.0, "window_s": [25.0, 145.0], "samples_in_window": 120, "queue_at_window_start": 2877.0, "queue_at_window_end": 2196.0, "pending_retrying_at_end": 2176.0, "post_p99_ms": 17.2}
