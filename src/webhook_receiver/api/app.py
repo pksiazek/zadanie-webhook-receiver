@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -47,6 +48,13 @@ MAX_SOURCE_LENGTH = 64
 # Metric label for requests without a usable X-Source: a fixed value
 # keeps cardinality bounded and never echoes a rejected header.
 NO_SOURCE = ""
+# The instrumentor joins these with "|" and re.search-es the result in
+# "<scheme>://<Host header><path>" (no query string). Anchoring on the
+# whole URL keeps keys such as "health-check" and client-chosen Host
+# headers such as "metrics.example" traced (spec §12).
+OTEL_EXCLUDED_URLS = ",".join(
+    rf"^https?://[^/]*/{path}\Z" for path in ("health", "ready", "metrics")
+)
 
 _log = logging.getLogger("webhook_receiver.api")
 
@@ -137,7 +145,10 @@ def create_app(
     async def post_webhook(request: Request) -> Response:
         # Order of checks (spec §6): size (413, middleware) -> X-Source
         # (400) -> body (422) -> rate limit (429) -> backpressure (503).
+        span = trace.get_current_span()
         source = request.headers.get("x-source", "")
+        # Measured on the latin-1 decoded header, i.e. in bytes for
+        # non-ASCII values; stricter than characters, which is harmless.
         if not source or len(source) > MAX_SOURCE_LENGTH:
             outcome("invalid", NO_SOURCE)
             return _detail(
@@ -145,6 +156,8 @@ def create_app(
                 "X-Source header is required"
                 f" (1-{MAX_SOURCE_LENGTH} characters)",
             )
+        # Request-span attributes: identifiers only, never the payload.
+        span.set_attribute("source", source)
         try:
             webhook = WebhookIn.model_validate_json(await request.body())
         except ValidationError as exc:
@@ -155,6 +168,7 @@ def create_app(
             )
             return _detail(422, errors)
         key = webhook.idempotency_key
+        span.set_attribute("idempotency_key", key)
 
         decision = app.state.limiter.check(source)
         if not decision.allowed:
@@ -234,7 +248,5 @@ def create_app(
     app.add_middleware(
         BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes
     )
-    FastAPIInstrumentor.instrument_app(
-        app, excluded_urls="health,ready,metrics"
-    )
+    FastAPIInstrumentor.instrument_app(app, excluded_urls=OTEL_EXCLUDED_URLS)
     return app

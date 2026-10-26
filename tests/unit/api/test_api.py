@@ -247,9 +247,55 @@ async def test_post_stores_traceparent_of_request_span(
 
 
 async def test_operational_endpoints_are_not_traced(client, span_exporter):
-    for path in ("/health", "/ready", "/metrics"):
+    for path in ("/health", "/ready", "/metrics", "/health?probe=1"):
         assert (await client.get(path)).status_code == 200
     assert span_exporter.get_finished_spans() == ()
+
+
+def _server_spans(span_exporter) -> list:
+    return [
+        s
+        for s in span_exporter.get_finished_spans()
+        if s.kind is SpanKind.SERVER
+    ]
+
+
+@pytest.mark.parametrize(
+    "path", ["/webhooks/health-check", "/webhooks/x/health", "/webhooks/ready"]
+)
+async def test_keys_resembling_operational_paths_are_traced(
+    client, span_exporter, path
+):
+    assert (await client.get(path)).status_code == 404
+    assert len(_server_spans(span_exporter)) == 1
+
+
+@pytest.mark.parametrize("host", ["metrics.example", "health", "ready:8000"])
+async def test_host_header_does_not_disable_tracing(
+    client, app, span_exporter, host
+):
+    r = await client.post(
+        "/webhooks",
+        json=GIST_WEBHOOKS[0],
+        headers={**SRC, "Host": host},
+    )
+    assert r.status_code == 202
+    assert len(_server_spans(span_exporter)) == 1
+    assert app.state.repo.get("evt-001").traceparent is not None
+
+
+async def test_request_span_has_source_and_key_attributes(
+    client, span_exporter
+):
+    await client.post("/webhooks", json=GIST_WEBHOOKS[0], headers=SRC)
+    await client.post("/webhooks", content=b"{}", headers=OTHER_SRC)
+    accepted, invalid = _server_spans(span_exporter)
+    assert accepted.attributes["source"] == "shop"
+    assert accepted.attributes["idempotency_key"] == "evt-001"
+    assert invalid.attributes["source"] == "crm"
+    assert "idempotency_key" not in invalid.attributes
+    for span in (accepted, invalid):
+        assert "payload" not in span.attributes
 
 
 async def test_payload_never_reaches_logs_or_spans(
@@ -457,3 +503,23 @@ async def test_extra_lifespan_runs_inside_cache_lifetime(tmp_path, clock):
         assert seen == [("enter", app.state.repo, True)]
     assert seen[-1] == ("exit", True)
     assert not app.state.stats._thread.is_alive()
+
+
+async def test_startup_failure_releases_cache_and_connections(tmp_path, clock):
+    captured = {}
+
+    @asynccontextmanager
+    async def failing(repo):
+        captured["conn"] = app.state.pool.get()
+        captured["thread"] = app.state.stats._thread
+        raise RuntimeError("extra lifespan failed")
+        yield  # pragma: no cover
+
+    settings = Settings(db_path=tmp_path / "c.db")
+    app = create_app(settings, clock=clock, extra_lifespan=failing)
+    with pytest.raises(RuntimeError, match="extra lifespan failed"):
+        async with app.router.lifespan_context(app):
+            pass  # pragma: no cover
+    assert not captured["thread"].is_alive()
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured["conn"].execute("SELECT 1")
