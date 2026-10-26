@@ -22,9 +22,11 @@ COPY src/ src/
 RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --extra loadtest --no-editable
-# Load generator (not part of the installed package): run from WORKDIR
-# as `python -m loadtest.run`.
+# Load generator and SQLite benchmarks (not part of the installed
+# package): run from WORKDIR as `python -m loadtest.run` and
+# `python -m benchmarks.sqlite_bench`.
 COPY loadtest/ loadtest/
+COPY benchmarks/ benchmarks/
 
 # Non-root user; /data is owned by it so an empty named volume mounted
 # there inherits that owner on first use.
