@@ -16,6 +16,13 @@ Topologia: api × 1, worker × 3 × `WORKER_CONCURRENCY=20` (`steady`,
 `burst`); worker × N = 1, 2, 3 (`scaling`). Liczby dotyczą tej maszyny —
 na innym sprzęcie, zwłaszcza innym dysku, będą inne.
 
+**Kiedy mierzono.** Test obciążeniowy (`steady`, `burst`, `scaling`)
+wykonano **przed dodaniem OpenTelemetry Collectora**. Ślady szły wtedy
+prosto do Jaegera, a metryki były tylko wystawiane na `/metrics` (bez
+wypychania przez OTLP). Z Collectorem powtórzono jedynie krótki `steady`
+(PASS). Benchmarków SQLite to nie dotyczy: nie używają sieci ani
+telemetrii; uruchomiono je ponownie po poprawkach z końcowej recenzji.
+
 ## `steady` — 1000/min przez 3 min ([`results/steady.txt`](results/steady.txt))
 
 | Faza | Czas | Żądania | p50 | p95 | p99 | max | Kody |

@@ -33,6 +33,7 @@ Jaegerze, metryki Prometheus, logi JSON).
 - [Kompromisy (tradeoffy)](#kompromisy-tradeoffy)
 - [TODO](#todo)
 - [Struktura repozytorium i dokumenty](#struktura-repozytorium-i-dokumenty)
+- [Jak powstał projekt](#jak-powstał-projekt)
 
 ## W skrócie
 
@@ -350,6 +351,15 @@ devcontainer z docker-in-docker, wolumen btrfs.
 
 Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md).
 
+> **Kiedy mierzono.** Test obciążeniowy (`steady`, `burst`, `scaling`)
+> wykonano **przed dodaniem OpenTelemetry Collectora**. Ślady szły wtedy
+> prosto do Jaegera, a metryki były tylko wystawiane na `/metrics` (bez
+> wypychania przez OTLP). Z Collectorem powtórzono jedynie krótki `steady`
+> (PASS).
+>
+> Benchmarków SQLite to nie dotyczy: nie używają sieci ani telemetrii.
+> Uruchomiono je ponownie po poprawkach z końcowej recenzji.
+
 ### Test obciążeniowy
 
 | Scenariusz | Ruch | p99 `POST` | Wynik |
@@ -439,6 +449,12 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
   Są przyjmowane, ale `GET` przez ścieżkę ich nie odpyta (normalizacja
   segmentów).
   [Więcej](docs/tradeoffs.md#klucze--i-)
+- **Logi JSON na stdout, zapisywane synchronicznie.**
+  Logi zbiera Docker (12-factor). Zapis odbywa się w ścieżce żądania i
+  próby workera, więc duża liczba wpisów kosztuje czas i CPU, a sterownik
+  `json-file` dokłada I/O. Test obciążeniowy z takimi logami spełnił
+  kryteria, ale ich kosztu nie mierzyliśmy osobno.
+  [Więcej](docs/tradeoffs.md#logi-json-na-stdout-zapisywane-synchronicznie)
 
 ## TODO
 
@@ -473,6 +489,9 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
   kodzie).
 - **Metryki:** liczyć odrzucenia `413`; osobna metryka awarii wbudowanego
   workera (`EMBEDDED_WORKER`; dziś tylko log).
+- **Logi poza ścieżką żądania:** zapis asynchroniczny
+  (`QueueHandler`/`QueueListener`), plik z rotacją albo logi OTLP przez
+  Collector, próbkowanie częstych wpisów; zmierzyć wpływ na opóźnienia.
 - **Pomiary:** użyteczny pułap zapisu przy p99 < 100 ms; pomiary na
   serwerze z Linuksem, bez warstwy wirtualizacji macOS.
 
@@ -485,15 +504,35 @@ src/webhook_receiver/
   api/          app.py (create_app), schemas, body_limit, ratelimit, queue_stats
   worker/       app.py (create_worker), http (/health, /metrics), backoff, simulation
 tests/          unit/, integration/, loadtest/
-loadtest/       generator obciążenia (steady, burst, flood, scaling-report), scaling.sh
+loadtest/       generator obciążenia (steady, burst, flood, scaling-report)
+  scaling.sh    scenariusz scaling: N = 1, 2, 3 workerów, uruchamiany na hoście
 benchmarks/     benchmarki SQLite (sync, claim, contention, retention)
-docs/           configuration.md, operations.md, results.md, tradeoffs.md, results/, superpowers/specs/, superpowers/plans/
+docs/           configuration.md, operations.md, results.md, tradeoffs.md
+  results/      surowe wyniki testu obciążeniowego i benchmarków
+  superpowers/  dokument projektowy, zapis brainstormingu, plan implementacji
+Dockerfile      jeden obraz dla api i workera, użytkownik inny niż root
+docker-compose.yml  api, workery, Collector, Jaeger, profil loadtest
+otel-collector.yaml konfiguracja OpenTelemetry Collectora
 ```
 
-- `otel-collector.yaml` — konfiguracja Collectora.
-- `api` i `worker` importują tylko z `common` (pilnuje tego test
-  architektury).
-- Jeden obraz Dockera, dwie komendy, użytkownik inny niż root.
-- Pełne uzasadnienia decyzji:
-  [dokument projektowy](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md)
-  i [zapis brainstormingu](docs/superpowers/specs/2026-10-25-webhook-receiver-brainstorming.md).
+## Jak powstał projekt
+
+Projekt zaprojektowano i zbudowano w Claude Code, według procesu ze
+zbioru umiejętności [superpowers](https://github.com/obra/superpowers).
+Pracowały modele Claude: głównie Opus (implementacja i recenzje) oraz
+Fable (recenzja dokumentu projektowego i końcowa recenzja całego
+repozytorium).
+
+1. Brainstorming z autorem: wymagania, warianty, decyzje.
+2. Dokument projektowy.
+3. Plan implementacji podzielony na zadania.
+4. Każde zadanie implementuje jeden subagent, a recenzuje drugi.
+   Poprawki trwają, aż recenzja nie ma uwag.
+5. Jeden PR na zadanie; autor go przegląda i scala.
+6. Na końcu recenzja całego repozytorium.
+
+Dokumenty:
+
+- [dokument projektowy](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md)
+- [zapis brainstormingu (dziennik decyzji)](docs/superpowers/specs/2026-10-25-webhook-receiver-brainstorming.md)
+- [plan implementacji](docs/superpowers/plans/2026-10-25-webhook-receiver.md)

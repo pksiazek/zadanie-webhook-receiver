@@ -189,3 +189,20 @@ pilnuje, żeby Docker nie zabił workera wcześniej.
 Granica ochrony przed duplikatami to retencja: po usunięciu wiersza (30 dni
 od zakończenia) ten sam klucz zostanie przyjęty jako nowe zdarzenie
 ([retencja](#retencja-dwa-progi-gdpr-plik-nie-maleje)).
+
+## Logi JSON na stdout, zapisywane synchronicznie
+
+Logi to JSON na stdout (12-factor). Proces nie zarządza plikami ani
+rotacją, a wpisy zbiera Docker (`docker compose logs`).
+
+Koszt: zapis jest synchroniczny i odbywa się w ścieżce żądania API oraz
+próby workera. Każdy wpis kosztuje więc czas i CPU, a sterownik `json-file`
+Dockera dokłada zapis na dysk. Im więcej wpisów, tym większy narzut.
+
+Test obciążeniowy działał w tej konfiguracji (log dostępu uvicorna
+wyłączony, jeden wpis na wynik żądania) i spełnił kryteria. Kosztu samych
+logów nie mierzyliśmy osobno.
+
+Zapis poza ścieżką żądania (`QueueHandler`/`QueueListener`, plik z
+rotacją albo logi OTLP przez Collector, próbkowanie częstych wpisów) i
+pomiar jego wpływu → [TODO](../README.md#todo).
