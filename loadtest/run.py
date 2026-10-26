@@ -502,7 +502,7 @@ def _scaling_inputs(
     ``-`` reads one JSON object per line from stdin; such rows are
     labelled ``stdin:<line>`` unless they carry a ``source`` field.
 
-    stdin lets scripts/scaling.sh pipe the results into the container
+    stdin lets loadtest/scaling.sh pipe the results into the container
     instead of bind-mounting the host directory (no uid or path issues).
     """
     inputs: list[tuple[str, str]] = []

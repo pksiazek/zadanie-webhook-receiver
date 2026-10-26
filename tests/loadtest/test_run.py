@@ -272,13 +272,13 @@ def test_scaling_report_missing_file(tmp_path, capsys):
 def test_scaling_report_uses_source_field_as_label(monkeypatch, capsys):
     rows = [
         {
-            "source": "results/scaling-1.json",
+            "source": "docs/results/scaling-1.json",
             "workers": 1,
             "throughput_per_min": 340.0,
             "valid": True,
         },
         {
-            "source": "results/scaling-2.json",
+            "source": "docs/results/scaling-2.json",
             "workers": 2,
             "throughput_per_min": None,
             "valid": False,
@@ -289,7 +289,7 @@ def test_scaling_report_uses_source_field_as_label(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(text))
     assert run.main(["scaling-report", "-"]) == 1
     out = capsys.readouterr().out
-    assert "results/scaling-2.json: measurement invalid" in out
+    assert "docs/results/scaling-2.json: measurement invalid" in out
     assert "stack up failed" in out
     assert "stdin:" not in out
 

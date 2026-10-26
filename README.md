@@ -360,7 +360,7 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 
 ### Benchmarki SQLite
 
-Źródło: [`results/benchmarks.txt`](results/benchmarks.txt).
+Źródło: [`docs/results/benchmarks.txt`](docs/results/benchmarks.txt).
 
 - **`synchronous=FULL` kosztuje ok. 2 ms na zapis przy 100 tx/s**
   (mediana 1,998 ms; bez przerw 0,442 ms). `NORMAL`: 0,195 ms.
@@ -485,11 +485,9 @@ src/webhook_receiver/
   api/          app.py (create_app), schemas, body_limit, ratelimit, queue_stats
   worker/       app.py (create_worker), http (/health, /metrics), backoff, simulation
 tests/          unit/, integration/, loadtest/
-loadtest/       generator obciążenia (steady, burst, flood, scaling-report)
+loadtest/       generator obciążenia (steady, burst, flood, scaling-report), scaling.sh
 benchmarks/     benchmarki SQLite (sync, claim, contention, retention)
-scripts/        scaling.sh
-results/        wyniki testu obciążeniowego i benchmarków
-docs/           configuration.md, operations.md, results.md, tradeoffs.md, superpowers/specs/, superpowers/plans/
+docs/           configuration.md, operations.md, results.md, tradeoffs.md, results/, superpowers/specs/, superpowers/plans/
 ```
 
 - `otel-collector.yaml` — konfiguracja Collectora.

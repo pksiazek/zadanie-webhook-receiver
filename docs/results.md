@@ -2,12 +2,12 @@
 
 [← README](../README.md)
 
-Pełne wyniki z katalogu [`results/`](../results/) z interpretacją. Podsumowanie jest w [README](../README.md#wyniki).
+Pełne wyniki z katalogu [`results/`](results/) z interpretacją. Podsumowanie jest w [README](../README.md#wyniki).
 
 ## Środowisko
 
-Wszystkie pomiary ([`results/`](../results/),
-[`results/environment.txt`](../results/environment.txt)): Apple Silicon,
+Wszystkie pomiary ([`results/`](results/),
+[`results/environment.txt`](results/environment.txt)): Apple Silicon,
 10 rdzeni, 11 GiB RAM, maszyna wirtualna Linux OrbStack na macOS
 (aarch64), devcontainer z docker-in-docker, Docker 29.9.2, Compose 2.40.3,
 obraz `python:3.14-slim-trixie` (Python 3.14.9, SQLite 3.46.1), wolumen
@@ -16,7 +16,7 @@ Topologia: api × 1, worker × 3 × `WORKER_CONCURRENCY=20` (`steady`,
 `burst`); worker × N = 1, 2, 3 (`scaling`). Liczby dotyczą tej maszyny —
 na innym sprzęcie, zwłaszcza innym dysku, będą inne.
 
-## `steady` — 1000/min przez 3 min ([`results/steady.txt`](../results/steady.txt))
+## `steady` — 1000/min przez 3 min ([`results/steady.txt`](results/steady.txt))
 
 | Faza | Czas | Żądania | p50 | p95 | p99 | max | Kody |
 |---|---|---|---|---|---|---|---|
@@ -28,7 +28,7 @@ Szczyt kolejki (`pending`+`retrying`): 9; `processing` w fazie przyjmowania
 Kryteria (p99 < 100 ms, zero odpowiedzi innych niż 2xx, limity faz, każdy
 klucz `completed`): **PASS**.
 
-## `burst` — 3000/min, potem 100/min, potem cisza ([`results/burst.txt`](../results/burst.txt))
+## `burst` — 3000/min, potem 100/min, potem cisza ([`results/burst.txt`](results/burst.txt))
 
 | Faza | Czas (limit) | Żądania | p50 | p95 | p99 | max | Kody |
 |---|---|---|---|---|---|---|---|
@@ -47,7 +47,7 @@ Opóźnienie planowania generatora (o ile później od planu wysłał żądanie)
 wynosiło maks. 12,7 ms w `burst` i 7,1 ms w `steady` — zadane tempo było
 utrzymane.
 
-## `scaling` — przepustowość przetwarzania dla N workerów ([`results/scaling-report.txt`](../results/scaling-report.txt))
+## `scaling` — przepustowość przetwarzania dla N workerów ([`results/scaling-report.txt`](results/scaling-report.txt))
 
 Na czystej bazie: 3000 zdarzeń wysłanych tempem 200/s z 5 źródeł, potem
 pomiar przez 120 s (okno 25–145 s) tempa kończenia zdarzeń.
@@ -65,7 +65,7 @@ odzyskanych rezerwacji; CPU workera ok. 1–11% (`docker stats` w trakcie).
 Przepustowość ogranicza tu liczba slotów, nie SQLite — patrz benchmark
 rywalizacji poniżej.
 
-## Benchmarki SQLite ([`results/benchmarks.txt`](../results/benchmarks.txt))
+## Benchmarki SQLite ([`results/benchmarks.txt`](results/benchmarks.txt))
 
 Koszt pojedynczych operacji w izolacji, kod produkcyjny (`connect()`,
 `EventRepository`), plik na dysku, 5 powtórzeń. W wierszach z n = 5 p95 =

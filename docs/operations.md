@@ -435,19 +435,19 @@ uruchamiany jako kontener (profil compose `loadtest`), na świeżym stosie:
 
 ```bash
 docker compose down -v && docker compose up -d --build --wait
-docker compose run --rm -T loadtest steady > results/steady.txt   # ~3 min
+docker compose run --rm -T loadtest steady > docs/results/steady.txt   # ~3 min
 docker compose down -v && docker compose up -d --build --wait
-docker compose run --rm -T loadtest burst > results/burst.txt     # ~6–7 min
-bash scripts/scaling.sh                                           # N = 1, 2, 3; ~10 min
+docker compose run --rm -T loadtest burst > docs/results/burst.txt     # ~6–7 min
+bash loadtest/scaling.sh                                           # N = 1, 2, 3; ~10 min
 ```
 
 Wszystkie tempa, czasy i progi to flagi (`docker compose run --rm loadtest
-steady --help`). `scripts/scaling.sh` działa po stronie hosta (kontener
+steady --help`). `loadtest/scaling.sh` działa po stronie hosta (kontener
 generatora celowo nie ma dostępu do Dockera): dla każdego N robi
 `docker compose down -v`, `up --scale worker=N`, zalewa kolejkę i zapisuje
-`results/scaling-N.json`, `results/scaling-N-observations.txt` oraz
-`results/scaling-report.txt`. Próbny przebieg bez nadpisywania wyników:
-`RESULTS_DIR=/tmp/scaling FLOOD_ARGS="--count 300 --warmup 2 --measure 10" bash scripts/scaling.sh 1`.
+`docs/results/scaling-N.json`, `docs/results/scaling-N-observations.txt` oraz
+`docs/results/scaling-report.txt`. Próbny przebieg bez nadpisywania wyników:
+`RESULTS_DIR=/tmp/scaling FLOOD_ARGS="--count 300 --warmup 2 --measure 10" bash loadtest/scaling.sh 1`.
 
 **Benchmarki SQLite** (ręcznie, poza CI — wyniki na współdzielonych
 maszynach GitHuba są zbyt zaszumione), na nazwanym wolumenie jak baza
@@ -456,7 +456,7 @@ produkcyjna, ~10 min:
 ```bash
 docker compose run --rm --no-deps -T -v bench-data:/data --entrypoint python \
   loadtest -W error -m benchmarks.sqlite_bench all --dir /data/bench --repeat 5 \
-  > results/benchmarks.txt
+  > docs/results/benchmarks.txt
 docker volume rm bench-data        # wolumen spoza projektu compose
 ```
 

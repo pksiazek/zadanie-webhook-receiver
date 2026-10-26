@@ -24,5 +24,4 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 otel-collector.yaml
-results/
-scripts/
+loadtest/scaling.sh
