@@ -17,6 +17,10 @@ from opentelemetry.context import Context
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.metrics import CallbackOptions, Meter, Observation
 from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    MetricReader,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import (
@@ -77,6 +81,28 @@ def _span_processor(exporter: SpanExporter | None) -> SpanProcessor | None:
     return BatchSpanProcessor(ConsoleSpanExporter(out=sys.stderr))
 
 
+def _metric_readers() -> list[MetricReader]:
+    """The local Prometheus reader always; OTLP push on request.
+
+    The Prometheus reader backs the processes' own ``/metrics``
+    endpoints. ``OTEL_METRICS_EXPORTER`` containing ``otlp`` adds a
+    periodic OTLP/HTTP push (to the Collector, spec §12); the exporter
+    honours ``OTEL_EXPORTER_OTLP_*`` and ``OTEL_METRIC_EXPORT_INTERVAL``.
+    """
+    readers: list[MetricReader] = [
+        PrometheusMetricReader(scope_info_enabled=False)
+    ]
+    choices = os.environ.get("OTEL_METRICS_EXPORTER", "").lower().split(",")
+    if "otlp" in (c.strip() for c in choices):
+        # Imported lazily: only needed when OTLP is configured.
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+
+        readers.append(PeriodicExportingMetricReader(OTLPMetricExporter()))
+    return readers
+
+
 def setup_telemetry(
     service_name: str, span_exporter: SpanExporter | None = None
 ) -> None:
@@ -98,9 +124,8 @@ def setup_telemetry(
         if processor is not None:
             tracer_provider.add_span_processor(processor)
         trace.set_tracer_provider(tracer_provider)
-        reader = PrometheusMetricReader(scope_info_enabled=False)
         metrics.set_meter_provider(
-            MeterProvider(resource=resource, metric_readers=[reader])
+            MeterProvider(resource=resource, metric_readers=_metric_readers())
         )
         _configured = True
 
@@ -188,6 +213,10 @@ class _ApiInstruments:
         return [Observation(stats.oldest_due_age_ms / 1000)]
 
 
+def _worker_up(_options: CallbackOptions) -> Iterable[Observation]:
+    return [Observation(1)]
+
+
 class _WorkerInstruments:
     def __init__(self) -> None:
         meter = get_meter()
@@ -207,6 +236,13 @@ class _WorkerInstruments:
         self.stale_results = meter.create_counter(
             "webhook_stale_results",
             description="Results rejected due to an attempt mismatch",
+        )
+        # One series per live worker process; its identity is the
+        # resource's service.instance.id, so the gauge has no attributes.
+        meter.create_observable_gauge(
+            "webhook_worker_up",
+            callbacks=[_worker_up],
+            description="1 while this worker process is running",
         )
 
 
