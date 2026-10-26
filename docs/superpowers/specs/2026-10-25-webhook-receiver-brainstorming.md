@@ -552,12 +552,15 @@ całym adresie**; spec §12 zaktualizowany.
 
 ## 34. SQLITE_BUSY w POST (benchmarki Task 15)
 
-Benchmark rywalizacji pokazał, że przy wysyceniu zapisu blokada SQLite nie
-jest sprawiedliwa: część procesów nie zatwierdza nic przez 10 s, a
-`BEGIN IMMEDIATE` kończy się `SQLITE_BUSY` po pełnym `busy_timeout` (5 s).
-W teście obciążeniowym zapisy to ok. 4% pułapu, więc problem dotyczy tylko
-nasycenia; worker już go przeżywa (log, odzyskanie rezerwacji), a `POST`
-odpowiadał `500`. **Decyzja (zaakceptowana przez użytkownika): `503` +
-`Retry-After` dla `SQLITE_BUSY`/`SQLITE_LOCKED` w przyjmowaniu zdarzenia;
-pozostałe błędy bazy nadal `500`; `busy_timeout` bez zmian** — podniesienie
-tylko wydłużyłoby ogon opóźnień. Spec §6 i §12 zaktualizowane.
+Wiersze `contention` w `results/benchmarks.txt` pokazują, że przy wysyceniu
+zapisu blokada SQLite nie jest sprawiedliwa: przy 4 i 8 procesach piszących
+najwolniejszy proces ma 0 tx/s, najdłuższa transakcja trwa ~5,1 s (pełny
+`busy_timeout=5000`), a w 5 przebiegach wystąpiło 4, 10 i 27 błędów
+`SQLITE_BUSY` (2, 4 i 8 procesów). Test obciążeniowy (`results/steady.txt`:
+3000 żądań w 180 s, ~17 zdarzeń/s) to wg analizy Task 15 ok. 100 tx/s, czyli
+ok. 4% pułapu ~2200–2300 tx/s — problem dotyczy tylko nasycenia. Worker już
+go przeżywa (log, odzyskanie rezerwacji), a `POST` odpowiadał `500`.
+**Decyzja (zaakceptowana przez użytkownika): `503` + `Retry-After` dla
+`SQLITE_BUSY`/`SQLITE_LOCKED` w przyjmowaniu zdarzenia; pozostałe błędy bazy
+nadal `500`; `busy_timeout` bez zmian** — podniesienie tylko wydłużyłoby
+ogon opóźnień. Spec §6 i §12 zaktualizowane.

@@ -205,9 +205,11 @@ limit (`429`; duplikaty też się liczą) → backpressure → zapis. Przy
 przekroczonym progu zaległości serwis najpierw sprawdza, czy klucz już
 istnieje: **duplikat dostaje `200` z aktualnym statusem, a nie `503`**
 [ustalone] — nie dodaje pracy, a nadawca w pętli ponowień nie pogłębia
-zalewu. `503` dostają tylko nowe zdarzenia. `Retry-After` dla `503`:
+zalewu. `503` dostają tylko nowe zdarzenia (wyjątek: przy rywalizacji o
+blokadę SQLite także duplikat — jego status nie jest wtedy znany).
+`Retry-After` dla `503`:
 stała konfigurowalna (domyślnie 5 s) [decyzja projektanta].
-Rywalizacja o blokadę zapisu (`SQLITE_BUSY`/`SQLITE_LOCKED`, także kody
+Rywalizacja o blokadę (`SQLITE_BUSY`/`SQLITE_LOCKED`, także kody
 rozszerzone) przy zapisie zdarzenia lub przy sprawdzaniu duplikatu w
 gałęzi backpressure daje ten sam `503` z tym samym `Retry-After`; pozostałe
 błędy bazy (np. I/O, uszkodzony plik) pozostają `500` [ustalone — po
