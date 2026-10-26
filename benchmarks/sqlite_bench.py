@@ -11,6 +11,7 @@ Results table goes to stdout, progress to stderr.
 
 import argparse
 import json
+import math
 import multiprocessing
 import shutil
 import sqlite3
@@ -20,6 +21,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty
 
 from loadtest.stats import percentile
 from webhook_receiver.common.clock import SystemClock
@@ -38,6 +40,8 @@ DAY_MS = 86_400_000
 LEASE_MS = 30_000  # LEASE_SECONDS default
 MAX_ATTEMPTS = 5  # MAX_ATTEMPTS default
 BATCH = 1000  # RETENTION_BATCH_SIZE default
+SYNC_WARMUP = 20  # untimed inserts before the timed ones
+SYNC_RATE = 100.0  # default pace of the paced sync case (tx/s)
 CLAIM_LIMIT = 20  # claim(20): WORKER_CONCURRENCY default
 LEASED_ROWS = 60  # 3 workers x 20 slots, all leases still valid
 # Representative webhook body (~200 bytes of JSON).
@@ -119,6 +123,14 @@ def ms_result(
     return Result(bench, case, n, median, p95, "ms", notes)
 
 
+def row_notes(r: Result) -> str:
+    """Notes, flagged when nearest-rank p95 is simply the maximum."""
+    if math.ceil(0.95 * r.n) < r.n:
+        return r.notes
+    flag = f"p95 = max (n={r.n})"
+    return f"{flag}; {r.notes}" if r.notes else flag
+
+
 def format_table(rows: Sequence[Result]) -> str:
     """Fixed-width table: ms with 3 decimals, rates with 1."""
     header = ("benchmark", "case", "n", "median", "p95", "unit", "notes")
@@ -134,7 +146,7 @@ def format_table(rows: Sequence[Result]) -> str:
             num(r, r.median),
             num(r, r.p95),
             r.unit,
-            r.notes,
+            row_notes(r),
         )
         for r in rows
     ]
@@ -221,41 +233,71 @@ def query_plan(conn: sqlite3.Connection, sql: str, params: dict) -> str:
 # --- 1. synchronous=FULL vs NORMAL ----------------------------------------
 
 
-def bench_sync(base: Path, repeat: int, sizes: Sizes) -> list[Result]:
-    results = []
-    for mode, expected in (("FULL", 2), ("NORMAL", 1)):
-        samples: list[float] = []
-        for rep in range(repeat):
-            log(f"sync {mode}: run {rep + 1}/{repeat}")
-            pool = ConnectionPool(fresh_db(base, f"sync-{mode.lower()}"))
-            try:
-                conn = pool.get()  # the connection the repository uses
-                conn.execute(f"PRAGMA synchronous={mode}")
-                actual = conn.execute("PRAGMA synchronous").fetchone()[0]
-                if actual != expected:
-                    raise RuntimeError(f"synchronous={actual}, want {mode}")
-                repo = EventRepository(pool, SystemClock())
-                for i in range(sizes.sync_inserts):
-                    elapsed, _ = timed(
-                        repo.insert_or_get,
-                        f"k-{i}",
-                        "bench",
-                        "order.created",
-                        PAYLOAD,
-                        None,
-                    )
-                    samples.append(elapsed)
-            finally:
-                pool.close_all()
-        rate = len(samples) / sum(samples)
-        results.append(
-            ms_result(
-                "sync",
-                f"{mode} insert_or_get",
-                samples,
-                f"{rate:.0f} tx/s serial",
+def _sync_samples(
+    base: Path, mode: str, expected: int, count: int, rate: float | None
+) -> list[float]:
+    """Durations of ``count`` timed ``insert_or_get`` calls.
+
+    ``rate`` paces the calls on a fixed schedule (tx/s); ``None`` runs
+    them back to back. ``SYNC_WARMUP`` untimed inserts come first.
+    """
+    pool = ConnectionPool(fresh_db(base, f"sync-{mode.lower()}"))
+    try:
+        conn = pool.get()  # the connection the repository uses
+        conn.execute(f"PRAGMA synchronous={mode}")
+        actual = conn.execute("PRAGMA synchronous").fetchone()[0]
+        if actual != expected:
+            raise RuntimeError(f"synchronous={actual}, want {mode}")
+        repo = EventRepository(pool, SystemClock())
+        for i in range(SYNC_WARMUP):
+            repo.insert_or_get(
+                f"warm-{i}", "bench", "order.created", PAYLOAD, None
             )
-        )
+        samples = []
+        started = time.perf_counter()
+        for i in range(count):
+            if rate is not None:
+                delay = started + i / rate - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+            elapsed, _ = timed(
+                repo.insert_or_get,
+                f"k-{i}",
+                "bench",
+                "order.created",
+                PAYLOAD,
+                None,
+            )
+            samples.append(elapsed)
+        return samples
+    finally:
+        pool.close_all()
+
+
+def bench_sync(
+    base: Path, repeat: int, sizes: Sizes, rate: float
+) -> list[Result]:
+    """Flat out, and paced at ``rate`` tx/s (0 = skip the paced case)."""
+    results = []
+    paces: list[float | None] = [None] + ([rate] if rate > 0 else [])
+    for mode, expected in (("FULL", 2), ("NORMAL", 1)):
+        for pace in paces:
+            label = "flat out" if pace is None else f"paced {pace:g} tx/s"
+            samples: list[float] = []
+            for rep in range(repeat):
+                log(f"sync {mode} {label}: run {rep + 1}/{repeat}")
+                samples += _sync_samples(
+                    base, mode, expected, sizes.sync_inserts, pace
+                )
+            p99 = percentile(samples, 99) * 1000
+            notes = f"p99 {p99:.3f} ms"
+            if pace is None:
+                notes += f"; {len(samples) / sum(samples):.0f} tx/s serial"
+            results.append(
+                ms_result(
+                    "sync", f"{mode} insert_or_get, {label}", samples, notes
+                )
+            )
     return results
 
 
@@ -271,6 +313,11 @@ def bench_claim(
     ``LEASED_ROWS`` valid leases). After every timed ``claim`` the
     claimed rows are put back to ``pending`` (untimed), so every claim
     sees exactly ``size`` ready rows.
+
+    Caveat: the reset restores the same ``run_at``, so every claim
+    re-takes the same 20 rows (same rowids) and the index pages they
+    live on stay hot in the page cache. This shows the cost does not
+    depend on the size of the ready set; it is not a draining queue.
     """
     results: list[Result] = []
     plans: list[str] = []
@@ -342,6 +389,19 @@ def bench_claim(
 # --- 3. write contention between processes --------------------------------
 
 
+BARRIER_TIMEOUT_S = 60.0  # all writers connected by then, or abort
+
+
+@dataclass(frozen=True)
+class WriterReport:
+    writer_id: int
+    count: int
+    busy: int
+    worst_s: float  # slowest insert_or_get, failed ones included
+    start: float  # time.monotonic() at barrier release (system-wide)
+    end: float
+
+
 def _writer(
     path: str,
     writer_id: int,
@@ -350,17 +410,18 @@ def _writer(
     results,  # multiprocessing.Queue
 ) -> None:
     pool = ConnectionPool(path)
-    count = errors = 0
-    worst = 0.0  # slowest insert_or_get, failed ones included
     try:
         repo = EventRepository(pool, SystemClock())
         pool.get()  # connect before the start line
-        barrier.wait()
-        deadline = time.perf_counter() + seconds
-        while (start := time.perf_counter()) < deadline:
+        barrier.wait(timeout=BARRIER_TIMEOUT_S)
+        count = busy = 0
+        worst = 0.0
+        begin = time.monotonic()
+        deadline = begin + seconds
+        while (start := time.monotonic()) < deadline:
             try:
                 repo.insert_or_get(
-                    f"w{writer_id}-{count}-{errors}",
+                    f"w{writer_id}-{count}-{busy}",
                     "bench",
                     "order.created",
                     PAYLOAD,
@@ -373,48 +434,101 @@ def _writer(
                 # can lose the lock race for that long.
                 if exc.sqlite_errorname != "SQLITE_BUSY":
                     raise
-                errors += 1
-            worst = max(worst, time.perf_counter() - start)
+                busy += 1
+            worst = max(worst, time.monotonic() - start)
+        report = WriterReport(
+            writer_id, count, busy, worst, begin, time.monotonic()
+        )
+        results.put(("ok", report))
+    except BaseException as exc:
+        results.put(("error", f"writer {writer_id}: {exc!r}"))
+        raise
     finally:
         pool.close_all()
-        results.put((writer_id, count, errors, worst))
+
+
+def run_writers(
+    path: Path,
+    writers: int,
+    seconds: float,
+    target: Callable[..., None] = _writer,
+) -> list[WriterReport]:
+    """Start ``writers`` processes on one barrier and collect reports.
+
+    A writer that fails (or dies) aborts the barrier so the others do
+    not wait forever; every process is terminated and joined on the way
+    out, and the failure is raised as ``RuntimeError``.
+    """
+    ctx = multiprocessing.get_context(MP_CONTEXT)
+    barrier = ctx.Barrier(writers)
+    queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=target, args=(str(path), w, seconds, barrier, queue)
+        )
+        for w in range(writers)
+    ]
+    reports: list[WriterReport] = []
+    deadline = time.monotonic() + BARRIER_TIMEOUT_S + seconds + 60
+    try:
+        for p in procs:
+            p.start()
+        while len(reports) < writers:
+            try:
+                kind, value = queue.get(timeout=0.5)
+            except Empty:
+                dead = [p for p in procs if p.exitcode not in (None, 0)]
+                if dead:
+                    raise RuntimeError(
+                        f"writer process exited with {dead[0].exitcode}"
+                    ) from None
+                if time.monotonic() > deadline:
+                    raise RuntimeError("writers did not finish") from None
+                continue
+            if kind != "ok":
+                raise RuntimeError(f"contention {value}")
+            reports.append(value)
+    except BaseException:
+        barrier.abort()
+        raise
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
+                p.join()
+        queue.close()
+        queue.join_thread()
+    return reports
 
 
 def bench_contention(base: Path, repeat: int, sizes: Sizes) -> list[Result]:
-    ctx = multiprocessing.get_context(MP_CONTEXT)
+    """Write throughput of 1..N processes looping ``insert_or_get``.
+
+    Rates are divided by the measured window: barrier release of the
+    first writer to the end of the last one (per process: its own).
+    """
     seconds = sizes.contention_seconds
     out = []
     for writers in sizes.writer_counts:
         totals: list[float] = []
         per_proc: list[float] = []
-        errors = 0
+        windows: list[float] = []
+        busy = 0
         worst = 0.0
         for rep in range(repeat):
             log(f"contention {writers} procs: run {rep + 1}/{repeat}")
             path = fresh_db(base, f"contention-{writers}")
-            barrier = ctx.Barrier(writers)
-            queue = ctx.Queue()
-            procs = [
-                ctx.Process(
-                    target=_writer,
-                    args=(str(path), w, seconds, barrier, queue),
-                )
-                for w in range(writers)
-            ]
-            for p in procs:
-                p.start()
-            reports = [queue.get(timeout=seconds + 120) for _ in procs]
-            for p in procs:
-                p.join()
-                if p.exitcode != 0:
-                    raise RuntimeError(f"writer exited with {p.exitcode}")
-            queue.close()
-            queue.join_thread()
-            counts = [c for _, c, _, _ in reports]
-            errors += sum(e for _, _, e, _ in reports)
-            worst = max(worst, *(w for _, _, _, w in reports))
-            totals.append(sum(counts) / seconds)
-            per_proc.extend(c / seconds for c in counts)
+            reports = run_writers(path, writers, seconds)
+            window = max(r.end for r in reports) - min(
+                r.start for r in reports
+            )
+            windows.append(window)
+            totals.append(sum(r.count for r in reports) / window)
+            per_proc.extend(r.count / (r.end - r.start) for r in reports)
+            busy += sum(r.busy for r in reports)
+            worst = max(worst, *(r.worst_s for r in reports))
         out.append(
             Result(
                 "contention",
@@ -425,7 +539,8 @@ def bench_contention(base: Path, repeat: int, sizes: Sizes) -> list[Result]:
                 "tx/s",
                 f"per proc median {statistics.median(per_proc):.0f}"
                 f" (min {min(per_proc):.0f}, max {max(per_proc):.0f}) tx/s;"
-                f" max tx {worst * 1000:.0f} ms; SQLITE_BUSY {errors}",
+                f" max tx {worst * 1000:.0f} ms; SQLITE_BUSY {busy};"
+                f" window max {max(windows):.2f} s",
             )
         )
     return out
@@ -501,8 +616,14 @@ def bench_retention(
             )
             elapsed, purged = timed(repo.purge, policy)
             totals.append(elapsed)
-            if purged.completed_deleted != sizes.retention_eligible:
-                raise RuntimeError(f"purge deleted {purged}")
+            expected = (sizes.retention_eligible, sizes.retention_eligible, 0)
+            got = (
+                purged.payloads_cleared,
+                purged.completed_deleted,
+                purged.failed_deleted,
+            )
+            if got != expected:
+                raise RuntimeError(f"purge returned {purged}")
         finally:
             pool.close_all()
     eligible = sizes.retention_eligible
@@ -535,6 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quick", action="store_true", help="tiny sizes (smoke test)"
     )
+    parser.add_argument(
+        "--sync-rate",
+        type=float,
+        default=SYNC_RATE,
+        help="pace of the paced sync case in tx/s (0 = skip it)",
+    )
     return parser
 
 
@@ -542,6 +669,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.repeat <= 0:
         raise SystemExit("--repeat must be positive")
+    if args.sync_rate < 0:
+        raise SystemExit("--sync-rate must not be negative")
     sizes = QUICK if args.quick else FULL
     base: Path = args.dir
     base.mkdir(parents=True, exist_ok=True)
@@ -551,7 +680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.perf_counter()
     for bench in selected:
         if bench == "sync":
-            rows += bench_sync(base, args.repeat, sizes)
+            rows += bench_sync(base, args.repeat, sizes, args.sync_rate)
         elif bench == "claim":
             got, plan = bench_claim(base, args.repeat, sizes)
             rows += got
