@@ -145,9 +145,12 @@ class Worker:
 
     async def _close_executor(self) -> None:
         # A call cancelled after the grace period may still be running in
-        # its thread; wait for it (bounded by SQLite's busy_timeout) so
-        # the caller can safely close the connection pool. Waiting runs
-        # off the loop so it stays responsive meanwhile.
+        # its thread; wait for it so the caller can safely close the
+        # connection pool. The wait is bounded by that repository call,
+        # which may be a multi-batch purge running through all remaining
+        # batches of every tier; each batch is its own transaction, so a
+        # SIGKILL during it is safe. Waiting runs off the loop so it
+        # stays responsive meanwhile.
         executor, self._executor = self._executor, None
         if executor is not None:
             await asyncio.to_thread(executor.shutdown, wait=True)

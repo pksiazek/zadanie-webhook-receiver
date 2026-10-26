@@ -222,10 +222,13 @@ async def test_stale_completion_is_rejected_and_counted(
     (current,) = worker_env.repo.claim(1, 60_000)
     assert current.attempts == 2
     before = _metric("webhook_stale_results_total")
-    with caplog.at_level(logging.INFO):
-        await asyncio.wait_for(
-            worker_env.make().process(stale), timeout=TIMEOUT
-        )
+    worker = worker_env.make()
+    try:
+        with caplog.at_level(logging.INFO):
+            await asyncio.wait_for(worker.process(stale), timeout=TIMEOUT)
+    finally:
+        # process() outside run(): close the executor run() would close.
+        await worker._close_executor()
     assert _metric("webhook_stale_results_total") == before + 1
     event = worker_env.get("evt-1")
     assert event.status == Status.PROCESSING
