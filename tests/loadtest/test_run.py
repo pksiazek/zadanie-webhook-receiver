@@ -1,4 +1,7 @@
+import asyncio
+import io
 import json
+import time
 from collections import Counter
 
 import httpx
@@ -74,6 +77,27 @@ def test_scaling_report_fails_on_invalid_measurement(tmp_path, capsys):
     assert "invalid" in capsys.readouterr().out
 
 
+def test_scaling_report_handles_null_throughput(tmp_path, capsys):
+    files = [_write(tmp_path, n, 340.0 * n) for n in (1, 2)]
+    files.append(_write(tmp_path, 3, None, valid=False))
+    assert run.main(["scaling-report", *files]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "scaling-3.json" in out
+
+
+def test_scaling_report_handles_unreadable_file(tmp_path, capsys):
+    files = [_write(tmp_path, n, 340.0 * n) for n in (1, 2)]
+    empty = tmp_path / "scaling-3.json"
+    empty.write_text("")
+    files.append(str(empty))
+    assert run.main(["scaling-report", *files]) == 1
+    out = capsys.readouterr().out
+    assert "scaling-3.json" in out
+    assert "unreadable" in out
+    assert "scaling: FAIL" in out
+
+
 def test_format_report_shows_failures():
     phase = PhaseResult(
         "intake", latencies=[0.01, 0.02], codes={202: 1, 429: 1}
@@ -87,7 +111,9 @@ def test_format_report_shows_failures():
         2,
         ["intake: 1 non-2xx responses"],
         0.1,
+        metrics_failures=3,
     )
+    assert "metrics sample failures: 3" in text
     assert "202:1,429:1" in text
     assert "FAIL intake: 1 non-2xx responses" in text
     assert text.endswith("result: FAIL")
@@ -95,23 +121,37 @@ def test_format_report_shows_failures():
 
 class _CountingSender:
     def __init__(self):
-        self.lags = []
+        self.dues = []
 
-    def send(self, phase, lag):
-        self.lags.append(lag)
+    def send(self, phase, due):
+        self.dues.append(due)
 
 
 async def test_open_loop_sends_count_at_rate():
     sender = _CountingSender()
     await run.open_loop(sender, PhaseResult("p"), 1000.0, count=20)
-    assert len(sender.lags) == 20
-    assert all(lag >= 0 for lag in sender.lags)
+    assert len(sender.dues) == 20
+    gaps = [b - a for a, b in zip(sender.dues, sender.dues[1:], strict=False)]
+    assert all(gap == pytest.approx(0.001) for gap in gaps)
 
 
 async def test_open_loop_duration_bound():
     sender = _CountingSender()
     await run.open_loop(sender, PhaseResult("p"), 1000.0, duration_s=0.02)
-    assert len(sender.lags) == 20
+    assert len(sender.dues) == 20
+
+
+async def test_sender_lag_measured_when_request_starts():
+    async with httpx.AsyncClient(
+        transport=_api({}), base_url="http://t"
+    ) as client:
+        sender = run.Sender(client, sources=1)
+        phase = PhaseResult("p")
+        # Planned 50 ms ago: the task starts late by at least that much.
+        sender.send(phase, time.perf_counter() - 0.05)
+        assert phase.max_lag_s == 0.0
+        await sender.drain()
+    assert phase.max_lag_s >= 0.05
 
 
 def _api(statuses):
@@ -142,7 +182,7 @@ async def test_sender_records_codes_without_retry():
         sender = run.Sender(client, sources=2)
         phase = PhaseResult("p")
         for _ in range(4):
-            sender.send(phase, 0.0)
+            sender.send(phase, time.perf_counter())
         await sender.drain()
     assert phase.codes == {202: 4}
     assert len(phase.latencies) == 4
@@ -163,7 +203,7 @@ async def test_sender_retries_429_after_retry_after():
     ) as client:
         sender = run.Sender(client, sources=1, retry_429=True)
         phase = PhaseResult("p")
-        sender.send(phase, 0.0)
+        sender.send(phase, time.perf_counter())
         await sender.drain()
     assert phase.codes == {429: 1, 202: 1}
     assert sender.retries == 1
@@ -173,3 +213,57 @@ async def test_sender_retries_429_after_retry_after():
 def test_parser_rejects_bad_arguments(argv):
     with pytest.raises(SystemExit):
         run.build_parser().parse_args(argv)
+
+
+def test_format_report_sub_millisecond_threshold():
+    text = run.format_report(
+        "steady", {}, [], [], Counter(), 0, [], 0.0005, metrics_failures=0
+    )
+    assert "p99 POST < 0.5 ms" in text
+    assert "metrics sample failures: 0" in text
+
+
+async def test_sampler_counts_non_200_as_failure():
+    responses = iter(
+        [
+            httpx.Response(500, text="oops"),
+            httpx.Response(
+                200, text='webhook_queue_depth{status="pending"} 4.0\n'
+            ),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://t"
+    ) as client:
+        sampler = run.Sampler(client, time.perf_counter(), interval=0.001)
+        task = asyncio.create_task(sampler.run())
+        sample = await asyncio.wait_for(sampler.next_sample(), 1)
+        task.cancel()
+    assert sample.depth == {"pending": 4.0}
+    assert sampler.failures == 1
+
+
+def test_scaling_report_reads_json_lines_from_stdin(monkeypatch, capsys):
+    lines = [
+        json.dumps({"workers": 1, "throughput_per_min": 340.0, "valid": True}),
+        "",
+        json.dumps({"workers": 2, "throughput_per_min": 680.0, "valid": True}),
+        json.dumps({"workers": 3, "throughput_per_min": None, "valid": False}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+    assert run.main(["scaling-report", "-"]) == 1
+    out = capsys.readouterr().out
+    assert "stdin:4: measurement invalid" in out
+    assert "99.0%" not in out
+    assert "100.0%  PASS" in out
+
+
+def test_scaling_report_missing_file(tmp_path, capsys):
+    files = [_write(tmp_path, n, 340.0 * n) for n in (1, 2)]
+    files.append(str(tmp_path / "nope.json"))
+    assert run.main(["scaling-report", *files]) == 1
+    assert "nope.json: unreadable" in capsys.readouterr().out

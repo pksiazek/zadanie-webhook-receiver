@@ -8,6 +8,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 _DEPTH_LINE = re.compile(
     r"^webhook_queue_depth\{(?P<labels>[^}]*)\}\s+(?P<value>\S+)"
@@ -122,6 +123,11 @@ class PhaseResult:
     max_lag_s: float = 0.0
 
 
+def format_ms(seconds: float) -> str:
+    """Seconds as a compact millisecond string: ``0.5 ms``, ``100 ms``."""
+    return f"{seconds * 1000:g} ms"
+
+
 def phase_failures(phase: PhaseResult, p99_limit_s: float) -> list[str]:
     """Human-readable reasons why ``phase`` failed (empty = PASS)."""
     failures = []
@@ -130,7 +136,7 @@ def phase_failures(phase: PhaseResult, p99_limit_s: float) -> list[str]:
         if p99 >= p99_limit_s:
             failures.append(
                 f"{phase.name}: p99 {p99 * 1000:.1f} ms"
-                f" >= {p99_limit_s * 1000:.0f} ms"
+                f" >= {format_ms(p99_limit_s)}"
             )
     non_2xx = sum(n for code, n in phase.codes.items() if code // 100 != 2)
     if non_2xx:
@@ -145,24 +151,95 @@ def phase_failures(phase: PhaseResult, p99_limit_s: float) -> list[str]:
     return failures
 
 
+def flood_result(
+    samples: Sequence[tuple[float, Mapping[str, float]]],
+    window: tuple[float, float],
+    codes: Mapping[int, int],
+    errors: int,
+    count: int,
+    workers: int,
+) -> dict[str, Any]:
+    """Throughput and validity of one ``flood`` measurement.
+
+    ``samples`` are ``(seconds, queue depth)`` pairs; only those inside
+    ``window`` are used. Throughput is the drain rate of
+    ``pending + retrying + processing``. The measurement is valid only
+    if every event was accepted (a 429 retried into a 2xx counts once,
+    as accepted) and ``pending + retrying`` never hit zero in the
+    window: an empty queue starves the workers and understates the rate.
+    """
+    start, end = window
+    inside = [(t, d) for t, d in samples if start <= t <= end]
+    points = [(t, backlog(d, include_processing=True)) for t, d in inside]
+    rejected = sum(n for c, n in codes.items() if c // 100 != 2 and c != 429)
+    accepted = sum(n for c, n in codes.items() if c // 100 == 2)
+    queued_at_end = backlog(inside[-1][1]) if inside else 0.0
+    starved = any(backlog(d) == 0 for _, d in inside)
+    enough = len(points) >= 2
+    valid = (
+        enough
+        and not starved
+        and accepted == count
+        and rejected == 0
+        and errors == 0
+    )
+    return {
+        "workers": workers,
+        "throughput_per_min": (
+            round(completion_rate_per_min(points), 1) if enough else None
+        ),
+        "valid": valid,
+        "count": count,
+        "accepted": accepted,
+        "rejected_other": rejected,
+        "transport_errors": errors,
+        "window_s": [round(start, 1), round(end, 1)],
+        "samples_in_window": len(points),
+        "queue_at_window_start": points[0][1] if points else None,
+        "queue_at_window_end": points[-1][1] if points else None,
+        "pending_retrying_at_end": queued_at_end,
+    }
+
+
 def scaling_report(
-    throughputs: Mapping[int, float], min_linearity: float
+    throughputs: Mapping[int, float],
+    min_linearity: float,
+    invalid: Mapping[int, str] | None = None,
+    errors: Sequence[str] = (),
 ) -> tuple[str, bool]:
-    """Table N / throughput / linearity and whether every N passes."""
-    ratios = linearity(throughputs)
+    """Table N / throughput / linearity and whether every N passes.
+
+    ``invalid`` maps worker counts whose measurement is unusable to a
+    reason; they are shown as FAIL rows and fail the report. ``errors``
+    (e.g. unreadable result files) are listed and fail it as well.
+    """
+    invalid = dict(invalid or {})
     lines = [
         f"{'workers':>7}  {'throughput/min':>14}  {'linear/min':>10}"
         f"  {'linearity':>9}  result",
     ]
-    passed = True
-    base = throughputs[1]
-    for n, ratio in ratios.items():
-        ok = ratio >= min_linearity
-        passed = passed and ok
-        lines.append(
-            f"{n:>7}  {throughputs[n]:>14.1f}  {n * base:>10.1f}"
-            f"  {ratio * 100:>8.1f}%  {'PASS' if ok else 'FAIL'}"
-        )
+    base = throughputs.get(1)
+    passed = not invalid and not errors and base is not None and base > 0
+    ratios = linearity(throughputs) if base is not None and base > 0 else {}
+    for n in sorted(set(throughputs) | set(invalid)):
+        if n in invalid:
+            lines.append(
+                f"{n:>7}  {'-':>14}  {'-':>10}  {'-':>9}  FAIL ({invalid[n]})"
+            )
+        elif n in ratios:
+            ok = ratios[n] >= min_linearity
+            passed = passed and ok
+            lines.append(
+                f"{n:>7}  {throughputs[n]:>14.1f}  {n * base:>10.1f}"
+                f"  {ratios[n] * 100:>8.1f}%  {'PASS' if ok else 'FAIL'}"
+            )
+        else:
+            lines.append(
+                f"{n:>7}  {throughputs[n]:>14.1f}  {'-':>10}  {'-':>9}  -"
+            )
+    if not ratios:
+        lines.append("FAIL no valid 1-worker baseline")
+    lines.extend(f"FAIL {error}" for error in errors)
     verdict = "PASS" if passed else "FAIL"
     lines.append(
         f"scaling: {verdict} (every N >= {min_linearity * 100:.0f}% linear)"

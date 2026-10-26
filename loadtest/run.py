@@ -28,7 +28,8 @@ from loadtest.stats import (
     PhaseResult,
     ZeroStreak,
     backlog,
-    completion_rate_per_min,
+    flood_result,
+    format_ms,
     latency_summary,
     parse_queue_depth,
     percentile,
@@ -74,8 +75,14 @@ class Sampler:
         while True:
             try:
                 resp = await self.client.get("/metrics")
-                depth = parse_queue_depth(resp.text)
-                if depth:
+                depth = (
+                    parse_queue_depth(resp.text)
+                    if resp.status_code == 200
+                    else {}
+                )
+                if not depth:
+                    self.failures += 1
+                else:
                     now = time.perf_counter() - self.t0
                     self.samples.append(Sample(now, depth))
                     self._new.set()
@@ -107,24 +114,33 @@ class Sender:
         self.retries = 0
         self.tasks: set[asyncio.Task[None]] = set()
 
-    def send(self, phase: PhaseResult, lag: float) -> None:
+    def send(self, phase: PhaseResult, due: float) -> None:
+        """Start one request planned for ``due`` (perf_counter time)."""
         seq = len(self.keys)
         key = f"lt-{self.run_id}-{seq}"
         self.keys.append(key)
         source = self.sources[seq % len(self.sources)]
-        phase.max_lag_s = max(phase.max_lag_s, lag)
-        task = asyncio.create_task(self._post(phase, key, source, seq))
+        task = asyncio.create_task(self._post(phase, key, source, seq, due))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
     async def _post(
-        self, phase: PhaseResult, key: str, source: str, seq: int
+        self,
+        phase: PhaseResult,
+        key: str,
+        source: str,
+        seq: int,
+        due: float,
     ) -> None:
         body = {
             "idempotency_key": key,
             "event_type": "loadtest",
             "payload": {"seq": seq},
         }
+        # Lag = planned vs actual start of the request, so event-loop
+        # delay before the task runs is included.
+        lag = max(0.0, time.perf_counter() - due)
+        phase.max_lag_s = max(phase.max_lag_s, lag)
         while True:
             start = time.perf_counter()
             try:
@@ -173,7 +189,7 @@ async def open_loop(
         delay = due - time.perf_counter()
         if delay > 0:
             await asyncio.sleep(delay)
-        sender.send(phase, max(0.0, time.perf_counter() - due))
+        sender.send(phase, due)
         i += 1
 
 
@@ -261,6 +277,7 @@ def format_report(
     sent: int,
     failures: Sequence[str],
     p99_limit_s: float,
+    metrics_failures: int = 0,
 ) -> str:
     lines = [f"scenario: {scenario}", f"params: {json.dumps(params)}", ""]
     lines.append(
@@ -324,7 +341,9 @@ def format_report(
         + " ".join(f"{k}={v}" for k, v in sorted(statuses.items()))
     )
     lines.append("")
-    lines.append(f"criteria: p99 POST < {p99_limit_s * 1000:.0f} ms,")
+    lines.append(f"metrics sample failures: {metrics_failures}")
+    lines.append("")
+    lines.append(f"criteria: p99 POST < {format_ms(p99_limit_s)},")
     lines.append("  zero non-2xx, phase limits, every key completed")
     for failure in failures:
         lines.append(f"  FAIL {failure}")
@@ -376,6 +395,7 @@ async def run_scenario(
             len(sender.keys),
             failures,
             args.p99_ms / 1000,
+            metrics_failures=sampler.failures,
         )
     )
     return 1 if failures else 0
@@ -448,70 +468,83 @@ async def flood(args: argparse.Namespace) -> int:
         window_end = time.perf_counter() - t0
         sampling.cancel()
 
-    window = [
-        (s.t, backlog(s.depth, include_processing=True))
-        for s in sampler.samples
-        if window_start <= s.t <= window_end
-    ]
-    rejected = sum(
-        n for c, n in phase.codes.items() if c // 100 != 2 and c != 429
+    result = flood_result(
+        [(s.t, s.depth) for s in sampler.samples],
+        (window_start, window_end),
+        phase.codes,
+        phase.errors,
+        args.count,
+        args.workers,
     )
-    accepted = sum(n for c, n in phase.codes.items() if c // 100 == 2)
-    # The queue must stay non-empty for the whole window, otherwise the
-    # workers ran out of work and the rate is underestimated.
-    queued_at_end = (
-        backlog(sampler.samples[-1].depth) if sampler.samples else 0.0
-    )
-    valid = (
-        len(window) >= 2
-        and queued_at_end > 0
-        and accepted == args.count
-        and rejected == 0
-        and phase.errors == 0
-    )
-    result = {
-        "workers": args.workers,
-        "throughput_per_min": (
-            round(completion_rate_per_min(window), 1)
-            if len(window) >= 2
-            else None
-        ),
-        "valid": valid,
-        "count": args.count,
-        "accepted": accepted,
-        "retried_429": sender.retries,
-        "rejected_other": rejected,
-        "transport_errors": phase.errors,
-        "all_sent_after_s": round(sent_at, 1),
-        "window_s": [round(window_start, 1), round(window_end, 1)],
-        "samples_in_window": len(window),
-        "queue_at_window_start": window[0][1] if window else None,
-        "queue_at_window_end": window[-1][1] if window else None,
-        "pending_retrying_at_end": queued_at_end,
-        "post_p99_ms": (
+    result.update(
+        retried_429=sender.retries,
+        all_sent_after_s=round(sent_at, 1),
+        metrics_sample_failures=sampler.failures,
+        post_p99_ms=(
             round(percentile(phase.latencies, 99) * 1000, 1)
             if phase.latencies
             else None
         ),
-    }
+    )
     print(json.dumps(result))
-    log(f"throughput {result['throughput_per_min']}/min, valid={valid}")
-    return 0 if valid else 1
+    log(
+        f"throughput {result['throughput_per_min']}/min,"
+        f" valid={result['valid']}"
+    )
+    return 0 if result["valid"] else 1
+
+
+def _scaling_inputs(
+    files: Sequence[str],
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """``(label, text)`` per result plus read errors.
+
+    ``-`` reads one JSON object per line from stdin.
+
+    stdin lets scripts/scaling.sh pipe the results into the container
+    instead of bind-mounting the host directory (no uid or path issues).
+    """
+    inputs: list[tuple[str, str]] = []
+    errors: list[str] = []
+    for path in files:
+        if path == "-":
+            lines = sys.stdin.read().splitlines()
+            inputs += [
+                (f"stdin:{i}", line)
+                for i, line in enumerate(lines, 1)
+                if line.strip()
+            ]
+            continue
+        try:
+            inputs.append((path, Path(path).read_text()))
+        except OSError as exc:
+            errors.append(f"{path}: unreadable ({exc!r})")
+    return inputs, errors
 
 
 def report_scaling(args: argparse.Namespace) -> int:
     throughputs: dict[int, float] = {}
-    invalid = []
-    for path in args.files:
-        data = json.loads(Path(path).read_text())
-        throughputs[int(data["workers"])] = float(data["throughput_per_min"])
-        if not data.get("valid", False):
-            invalid.append(path)
-    text, passed = scaling_report(throughputs, args.min_linearity)
+    invalid: dict[int, str] = {}
+    results, unreadable = _scaling_inputs(args.files)
+    for path, raw in results:
+        try:
+            data = json.loads(raw)
+            workers = int(data["workers"])
+        except (ValueError, KeyError, TypeError) as exc:
+            unreadable.append(f"{path}: unreadable ({exc!r})")
+            continue
+        throughput = data.get("throughput_per_min")
+        if not data.get("valid", False) or throughput is None:
+            invalid[workers] = (
+                f"{path}: measurement invalid, throughput_per_min={throughput}"
+            )
+        else:
+            throughputs[workers] = float(throughput)
+    text, passed = scaling_report(
+        throughputs, args.min_linearity, invalid=invalid, errors=unreadable
+    )
     print(text)
-    for path in invalid:
-        print(f"FAIL {path}: measurement marked invalid")
-    return 0 if passed and not invalid else 1
+    return 0 if passed else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -554,7 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=flood)
 
     p = sub.add_parser("scaling-report", help="table from flood results")
-    p.add_argument("files", nargs="+")
+    p.add_argument("files", nargs="+", help="flood JSON files, - = stdin")
     p.add_argument("--min-linearity", type=float, default=0.85)
     p.set_defaults(func=report_scaling)
     return parser
