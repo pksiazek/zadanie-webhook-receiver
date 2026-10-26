@@ -532,7 +532,11 @@ build SQLite).
   - `opentelemetry-instrumentation-fastapi` — span dla każdego żądania,
     z wyłączeniem `/health`, `/ready` i `/metrics`
     (`OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`) — inaczej healthchecki i
-    próbkowanie `/metrics` co 1 s zalewają ślady.
+    próbkowanie `/metrics` co 1 s zalewają ślady. Wzorce **zakotwiczone na
+    całym adresie** (`^https?://[^/]*/health\Z` itd.): instrumentor
+    dopasowuje je do `schemat://Host/ścieżka`, więc wzorzec niezakotwiczony
+    pozwalałby klientowi podstawionym nagłówkiem `Host` wyłączyć span
+    żądania i zapis `traceparent` [rozstrzygnięcie z recenzji Task 10].
   - Przy zapisie nowego zdarzenia bieżący kontekst zapisywany w kolumnie
     `traceparent` (format W3C) [ustalone — obowiązkowe].
   - Worker przy każdej próbie odtwarza kontekst z `traceparent` i tworzy

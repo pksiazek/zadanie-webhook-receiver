@@ -542,3 +542,10 @@ Middleware limitu body obejmuje całą aplikację, więc `413` wyprzedza `400`
 za brak `X-Source`. **Decyzja (rozstrzygnięcie koordynatora zaakceptowane
 przez użytkownika): kolejność `413` → `400` → `422` → `429` → backpressure.**
 Spec §6 zaktualizowany.
+
+## 33. Zakotwiczone wykluczenia OTel (recenzja Task 10)
+
+Wzorzec `health,ready,metrics` był dopasowywany jako fragment do
+`schemat://Host/ścieżka` — klient mógł nagłówkiem `Host` wyłączyć span
+`POST` (pusty `traceparent`). **Rozstrzygnięcie: wzorce zakotwiczone na
+całym adresie**; spec §12 zaktualizowany.
