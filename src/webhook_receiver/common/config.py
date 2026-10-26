@@ -1,12 +1,13 @@
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 Port = Annotated[int, Field(ge=0, le=65535)]
 PositiveInt = Annotated[int, Field(gt=0)]
 PositiveFloat = Annotated[float, Field(gt=0)]
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Settings(BaseSettings):
@@ -37,7 +38,12 @@ class Settings(BaseSettings):
     max_body_bytes: PositiveInt = 262_144
     worker_metrics_port: Port = 9100
     embedded_worker: bool = False
-    log_level: str = "INFO"
+    log_level: LogLevel = "INFO"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_log_level(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _check_consistency(self) -> Self:

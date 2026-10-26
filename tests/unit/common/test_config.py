@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from webhook_receiver.common.config import Settings
 
@@ -62,3 +63,15 @@ def test_invalid_ports_rejected(field, port):
 def test_backoff_max_must_not_be_below_base():
     with pytest.raises(ValueError):
         Settings(backoff_base_seconds=10, backoff_max_seconds=5)
+
+
+@pytest.mark.parametrize("value", ["verbose", "", "TRACE"])
+def test_invalid_log_level_rejected(monkeypatch, value):
+    monkeypatch.setenv("LOG_LEVEL", value)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_log_level_accepts_lowercase(monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+    assert Settings().log_level == "DEBUG"

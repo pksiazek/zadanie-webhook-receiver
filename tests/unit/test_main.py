@@ -52,6 +52,7 @@ def test_main_api_runs_uvicorn(env, uvicorn_calls):
         "port": 8000,
         "workers": 1,
         "log_config": None,
+        "access_log": False,
     }
 
 

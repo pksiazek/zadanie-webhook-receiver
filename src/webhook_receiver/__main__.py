@@ -81,6 +81,9 @@ def _run_api(settings: Settings) -> int:
         port=settings.api_port,
         workers=1,
         log_config=None,
+        # POST outcomes are logged by the app and every request is traced;
+        # per-request access lines (incl. /ready probes) are just noise.
+        access_log=False,
     )
     return 0
 

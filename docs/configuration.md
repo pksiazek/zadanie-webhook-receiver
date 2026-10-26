@@ -35,7 +35,7 @@ SIMULATED_MAX_SECONDS`, `BACKOFF_MAX_SECONDS ≥ BACKOFF_BASE_SECONDS`).
 | `RETENTION_COMPLETED_DAYS` / `RETENTION_FAILED_DAYS` | `30` / `30` | usuwanie wierszy |
 | `RETENTION_BATCH_SIZE` | `1000` | wierszy na transakcję retencji |
 | `WORKER_METRICS_PORT` | `9100` | serwer pomocniczy workera |
-| `LOG_LEVEL` | `INFO` | poziom logów |
+| `LOG_LEVEL` | `INFO` | poziom logów: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (wielkość liter dowolna) |
 
 ## OpenTelemetry
 
