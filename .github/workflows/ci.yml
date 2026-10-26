@@ -46,4 +46,4 @@ jobs:
       - name: Smoke test
         run: >-
           docker run --rm --entrypoint python webhook-receiver:ci -c
-          "import webhook_receiver.api.app, webhook_receiver.worker.app"
+          "import webhook_receiver.api.app, webhook_receiver.worker.app, loadtest.run"

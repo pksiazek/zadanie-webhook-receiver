@@ -66,6 +66,19 @@ services:
     # SIGKILL a worker while it finishes in-flight events.
     stop_grace_period: 20s
 
+  # Load generator (spec §13); only with `--profile loadtest` or
+  # `docker compose run loadtest ...`. No Docker socket on purpose:
+  # scripts/scaling.sh orchestrates from the host.
+  loadtest:
+    image: webhook-receiver:local
+    profiles: ["loadtest"]
+    entrypoint: ["python", "-m", "loadtest.run"]
+    environment:
+      BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
   jaeger:
     # Jaeger v2 all-in-one: OTLP (4317 gRPC, 4318 HTTP) is on by default.
     image: jaegertracing/jaeger:2.22.0
