@@ -14,7 +14,6 @@ Prometheus, logi JSON). Szczegóły: [konfiguracja](docs/configuration.md),
 
 ## Spis treści
 
-- [Wymagania z zadania → gdzie](#wymagania-z-zadania--gdzie)
 - [W skrócie](#w-skrócie)
 - [Architektura](#architektura)
 - [Co naprawdę gwarantujemy („dokładnie raz”)](#co-naprawdę-gwarantujemy-dokładnie-raz)
@@ -28,33 +27,6 @@ Prometheus, logi JSON). Szczegóły: [konfiguracja](docs/configuration.md),
 - [Kompromisy (tradeoffy)](#kompromisy-tradeoffy)
 - [TODO](#todo)
 - [Struktura repozytorium i dokumenty](#struktura-repozytorium-i-dokumenty)
-
-## Wymagania z zadania → gdzie
-
-| Z treści zadania | Gdzie |
-|---|---|
-| **HTTP API**, które przyjmuje webhooki i udostępnia status | [API](#api), [przykłady](#przykłady-webhooki-z-treści-zadania) |
-| **SQLite** jako baza danych | [architektura](#architektura), [schemat](docs/tradeoffs.md#schemat) |
-| Przetwarzanie async (`sleep(2-5s)` + zapis wyniku) | [architektura](#architektura), [statusy](#statusy-zdarzenia) |
-| Przetworzenie **dokładnie raz**, także po restarcie | [gwarancje](#co-naprawdę-gwarantujemy-dokładnie-raz), [demonstracje](docs/operations.md#demonstracje) |
-| Sprawdzenie statusu przetwarzania | [`GET /webhooks/{key}`](docs/operations.md#get-webhooksidempotency_key) |
-| Poprawne działanie przy wielu równoczesnych webhookach | [założenia skalowalności](#założenia-skalowalności), [wyniki](#wyniki) |
-| Zdefiniowana retencja | [retencja](docs/tradeoffs.md#retencja-dwa-progi-gdpr-plik-nie-maleje) |
-| README: architektura, tradeoffs, instrukcje uruchomienia | [architektura](#architektura), [kompromisy](#kompromisy-tradeoffy), [uruchomienie](#uruchomienie) |
-| Działający kod w Pythonie, który można uruchomić i przetestować | [uruchomienie](#uruchomienie), [testy](#testy) |
-| Dockerfile | [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml), [uruchomienie](#uruchomienie) |
-| Sekcja `# TODO` | [TODO](#todo) |
-| Bonus: testy jednostkowe | [testy](docs/operations.md#testy-test-obciążeniowy-benchmarki) (próg pokrycia 85% w CI) |
-| Bonus: rate limiting | [API](#api), [szczegóły](docs/operations.md#post-webhooks) |
-| Bonus: metryki, health/readiness | [obserwowalność](docs/operations.md#obserwowalność), [endpointy](docs/operations.md#endpointy-operacyjne) |
-| Bonus: retry dla failed webhooków | [statusy](#statusy-zdarzenia), [demo ponowień](docs/operations.md#ponowienia-i-rate-limiting) |
-| Bonus: testy obciążeniowe lub benchmarki | oba: [wyniki](docs/results.md) |
-| Ocena: niezawodność (restart) | [gwarancje](#co-naprawdę-gwarantujemy-dokładnie-raz) |
-| Ocena: idempotency (duplikaty) | [gwarancje](#co-naprawdę-gwarantujemy-dokładnie-raz), [duplikat](#przykłady-webhooki-z-treści-zadania) |
-| Ocena: przetwarzanie async | [architektura](#architektura), [wynik `burst`](docs/results.md#burst--3000min-potem-100min-potem-cisza-resultsbursttxt) |
-| Ocena: model danych (indeksy, statusy) | [schemat](docs/tradeoffs.md#schemat), [statusy](#statusy-zdarzenia) |
-| Ocena: obserwowalność | [obserwowalność](#obserwowalność), [szczegóły](docs/operations.md#obserwowalność) |
-| Ocena: tradeoffs | [kompromisy](#kompromisy-tradeoffy), [szczegóły](docs/tradeoffs.md) |
 
 ## W skrócie
 
@@ -99,15 +71,10 @@ flowchart LR
   co `POLL_INTERVAL_SECONDS` (0,5 s).
 - **Ślad** przechodzi przez granicę procesów: API zapisuje W3C `traceparent`
   w wierszu, worker tworzy z niego span `webhook.process` na każdą próbę.
-- Odrzucone: jeden proces z pulą asyncio (API i przetwarzanie dzielą los, brak
-  niezależnego skalowania) i
-  broker Redis/Celery (zadanie narzuca SQLite, podwójny zapis wymaga
-  outboxa) — [dokument projektowy §5](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md#5-wybrane-podejście).
 
 ## Co naprawdę gwarantujemy („dokładnie raz”)
 
-Dokładnie-raz end-to-end nie jest możliwe bez współpracy samego efektu
-ubocznego. Serwis gwarantuje:
+„Dokładnie raz” rozkłada się na trzy etapy, a każdy ma inną gwarancję:
 
 | Co | Gwarancja | Mechanizm |
 |---|---|---|
@@ -152,20 +119,10 @@ API: `localhost:8000`, Jaeger UI: `localhost:16686`. Porty →
 [docs/configuration.md](docs/configuration.md#docker-wymagania-i-porty); pętla restartów przy błędzie
 konfiguracji → [docs/operations.md](docs/operations.md#pętla-restartów-przy-błędzie-konfiguracji).
 
-**Lokalnie (uv)**, worker w procesie API (tylko development; szczegóły →
-[docs/configuration.md](docs/configuration.md#tryb-lokalny-uv)):
-
-```bash
-uv sync --extra dev
-EMBEDDED_WORKER=true uv run python -m webhook_receiver api
-```
-
-**Devcontainer** z docker-in-docker (w nim powstały wszystkie wyniki),
-polecenia jak na „gołym” hoście → [docs/configuration.md](docs/configuration.md#devcontainer).
-
 ### Testy
 
 ```bash
+uv sync --extra dev                                   # zależności testowe
 uv run ruff check . && uv run ruff format --check .   # jak w CI
 uv run pytest            # unit + integration, próg pokrycia 85%
 ```
