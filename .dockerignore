@@ -1,4 +1,4 @@
-# Build context needs only pyproject.toml, uv.lock, src/ and loadtest/.
+# Build context needs only pyproject.toml, uv.lock, src/, loadtest/ and benchmarks/.
 .git
 .gitignore
 .venv
@@ -24,5 +24,4 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 otel-collector.yaml
-results/
-scripts/
+loadtest/scaling.sh

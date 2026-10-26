@@ -3,17 +3,17 @@
 # clean stack, flood the queue and measure how fast it drains.
 # Runs on the host: the loadtest container has no Docker access.
 #
-# Usage: bash scripts/scaling.sh [N ...]      (default: 1 2 3)
+# Usage: bash loadtest/scaling.sh [N ...]     (default: 1 2 3)
 # Extra flood flags can be passed via FLOOD_ARGS, e.g.
-#   FLOOD_ARGS="--measure 60" bash scripts/scaling.sh 1
-# RESULTS_DIR (default: results) redirects all output files, e.g. for a
+#   FLOOD_ARGS="--measure 60" bash loadtest/scaling.sh 1
+# RESULTS_DIR (default: docs/results) redirects all output files, e.g. for a
 # trial run that must not overwrite the committed results.
 # A failed flood does not stop the run: its row shows FAIL in the
 # report and the script exits non-zero at the end.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-RESULTS_DIR="${RESULTS_DIR:-results}"
+RESULTS_DIR="${RESULTS_DIR:-docs/results}"
 mkdir -p "$RESULTS_DIR"
 
 counts=("$@")

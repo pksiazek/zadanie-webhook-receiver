@@ -2,7 +2,17 @@
 
 [← README](../README.md)
 
-Dla operatora i oceniającego: demonstracje zachowania (awaria workera, restart API, ponowienia, rate limiting), szczegóły API, obserwowalność, zapytania SQLite oraz uruchamianie testów, testu obciążeniowego i benchmarków. Wszystkie polecenia zakładają stos z [README](../README.md#uruchomienie) (`docker compose up -d --build --wait`).
+Dla operatora i oceniającego:
+
+- demonstracje zachowania (awaria workera, restart API, ponowienia, rate
+  limiting),
+- szczegóły API,
+- obserwowalność,
+- zapytania SQLite,
+- uruchamianie testów, testu obciążeniowego i benchmarków.
+
+Wszystkie polecenia zakładają stos z [README](../README.md#uruchomienie)
+(`docker compose up -d --build --wait`).
 
 ## Spis treści
 
@@ -43,8 +53,10 @@ curl -s localhost:8000/webhooks/evt-crash   # nadal "completed"
 
 ### Ponowienia i rate limiting
 
-**Ponowienia** — deterministyczne wyzwalacze błędów w `payload.simulate`
-(dodatek do przykładów z zadania):
+#### Ponowienia
+
+Deterministyczne wyzwalacze błędów w `payload.simulate` (dodatek do
+przykładów z zadania):
 
 ```bash
 H='Content-Type: application/json'
@@ -69,12 +81,15 @@ sleep 65; curl -s localhost:8000/webhooks/evt-fail-always
 # "status":"failed","attempts":5,"last_error":"simulated failure (fail_always)"
 ```
 
-`fail_always` trwa ok. 35–60 s: 5 prób po 2–5 s plus odstępy ok. 2, 4, 8 i
-16 s. Odstęp to `min(BACKOFF_BASE_SECONDS · 2^(attempts−1),
-BACKOFF_MAX_SECONDS)` z losowym rozrzutem ±20%.
+- `fail_always` trwa ok. 35–60 s: 5 prób po 2–5 s plus odstępy ok. 2, 4,
+  8 i 16 s.
+- Odstęp to `min(BACKOFF_BASE_SECONDS · 2^(attempts−1),
+  BACKOFF_MAX_SECONDS)` z losowym rozrzutem ±20%.
 
-**Rate limiting** — 150 równoległych żądań z jednego źródła (kubełek: 100
-żądań na start, potem 50/s):
+#### Rate limiting
+
+150 równoległych żądań z jednego źródła (kubełek: 100 żądań na start,
+potem 50/s):
 
 ```bash
 H='Content-Type: application/json'
@@ -87,17 +102,20 @@ seq 1 150 | xargs -P 20 -I@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 ## Pętla restartów przy błędzie konfiguracji
 
-Wszystkie kontenery mają `restart: unless-stopped`. Konsekwencja: błąd
-konfiguracji przy starcie (np. `LEASE_SECONDS` ≤ `SIMULATED_MAX_SECONDS`)
-daje **pętlę restartów**, widoczną w `docker compose ps` (status
-`Restarting`) i w `docker compose logs <usługa>` (błąd walidacji
-konfiguracji).
+Wszystkie kontenery mają `restart: unless-stopped`.
+
+Konsekwencja: błąd konfiguracji przy starcie (np. `LEASE_SECONDS` ≤
+`SIMULATED_MAX_SECONDS`) daje **pętlę restartów**. Widać ją:
+
+- w `docker compose ps` (status `Restarting`),
+- w `docker compose logs <usługa>` (błąd walidacji konfiguracji).
 
 ## Zatrzymanie (`docker compose stop`)
 
-Workery po SIGTERM kończą trwające próby (do `SHUTDOWN_GRACE_SECONDS`) i
-kończą się kodem 0. `api` kończy się kodem 143 — uvicorn po czystym
-zamknięciu ponownie zgłasza SIGTERM; to nie jest błąd.
+- **Workery** po SIGTERM kończą trwające próby (do
+  `SHUTDOWN_GRACE_SECONDS`) i kończą się kodem 0.
+- **`api`** kończy się kodem 143 — uvicorn po czystym zamknięciu ponownie
+  zgłasza SIGTERM; to nie jest błąd.
 
 ## API — szczegóły
 
@@ -105,49 +123,61 @@ zamknięciu ponownie zgłasza SIGTERM; to nie jest błąd.
 
 Kody odpowiedzi i kolejność kontroli: [README](../README.md#api).
 
-Nagłówki: `Content-Type: application/json`, **`X-Source`** (wymagany,
-1–64 znaki). Body:
+**Nagłówki:** `Content-Type: application/json`, **`X-Source`** (wymagany,
+1–64 znaki).
+
+**Body:**
 
 ```json
 {"idempotency_key": "evt-001", "event_type": "order.created", "payload": {"...": "..."}}
 ```
 
-- `idempotency_key` — niepusty string, maks. 255 znaków, dowolne znaki;
+- `idempotency_key` — niepusty napis, maks. 255 znaków, dowolne znaki;
   **globalnie unikalny** (nie w obrębie nadawcy).
-- `event_type` — niepusty string; `payload` — obiekt JSON; inne pola są
-  ignorowane.
-- Limit body: 256 KiB (`MAX_BODY_BYTES`), sprawdzany na `Content-Length` i
-  przy czytaniu strumienia (żądania chunked).
+- `event_type` — niepusty napis.
+- `payload` — obiekt JSON.
+- Inne pola są ignorowane.
+- Limit body: 256 KiB (`MAX_BODY_BYTES`), sprawdzany na `Content-Length`
+  i przy czytaniu strumienia (żądania chunked).
 
-`Retry-After` dla obu `503`: `BACKPRESSURE_RETRY_AFTER_SECONDS` (5 s); dla
-`429`: czas do odnowienia jednego żetonu (min. 1 s).
+**`Retry-After`:**
 
-**Rate limiting per `X-Source`.** Token bucket w pamięci procesu API:
-`RATE_LIMIT_PER_SECOND` = 50 żądań/s, `RATE_LIMIT_BURST` = 100 na źródło.
-`X-Source` jest wymagany właśnie dlatego — limit liczony jest per nadawca,
-więc nadawcę trzeba znać; dodatkowo służy jako etykieta w metrykach, logach
-i śladach. Nie jest częścią tożsamości zdarzenia: w wierszu zapisywane jest
-źródło pierwszego zgłoszenia, ponowienie z innego źródła to zwykły
-duplikat.
+- dla obu `503`: `BACKPRESSURE_RETRY_AFTER_SECONDS` (5 s),
+- dla `429`: czas do odnowienia jednego żetonu (min. 1 s).
+
+#### Rate limiting per `X-Source`
+
+Token bucket w pamięci procesu API: `RATE_LIMIT_PER_SECOND` = 50 żądań/s,
+`RATE_LIMIT_BURST` = 100 na źródło.
+
+**Rola `X-Source`.** Nagłówek jest wymagany właśnie dlatego — limit
+liczony jest per nadawca, więc nadawcę trzeba znać.
+
+- Dodatkowo służy jako etykieta w metrykach, logach i śladach.
+- Nie jest częścią tożsamości zdarzenia: w wierszu zapisywane jest źródło
+  pierwszego zgłoszenia, a ponowienie z innego źródła to zwykły duplikat.
+
+**Granice limitera:**
 
 - **Pamięć limitera jest ograniczona.** Kubełki trzyma LRU do
-  `RATE_LIMIT_MAX_SOURCES` (10 000) źródeł, więc dowolne wartości nagłówka
-  nie powiększają jej bez końca.
+  `RATE_LIMIT_MAX_SOURCES` (10 000) źródeł, więc dowolne wartości
+  nagłówka nie powiększają jej bez końca.
 - **Konsekwencja LRU:** przy ponad 10 000 aktywnych źródeł najdawniej
   używany kubełek jest usuwany, a jego źródło wraca z pełnym kubełkiem
   (burst). Przy celowym zalewie losowymi `X-Source` limit per źródło
   przestaje chronić.
-- **Metryki nie są ograniczone.** `webhooks_received_total` ma osobną serię
-  dla każdej wartości `X-Source`, więc nieuwierzytelniony nadawca może
-  dowolnie zwiększać ich liczbę (→ [TODO](../README.md#todo)).
+- **Metryki nie są ograniczone.** `webhooks_received_total` ma osobną
+  serię dla każdej wartości `X-Source`, więc nieuwierzytelniony nadawca
+  może dowolnie zwiększać ich liczbę (→ [TODO](../README.md#todo)).
 - **Jeden proces:** limit działa w obrębie jednego procesu API (patrz
   [jeden proces uvicorn](tradeoffs.md#jeden-proces-uvicorn)).
 
 ### `GET /webhooks/{idempotency_key}`
 
-Nie wymaga `X-Source`. Klucz w ścieżce kodowany procentowo (RFC 3986), np.
-`evt/1` → `/webhooks/evt%2F1` — tak samo jak w `Location` i `status_url`.
-Nieznany klucz → `404`.
+- Nie wymaga `X-Source`.
+- Klucz w ścieżce kodowany procentowo (RFC 3986), np. `evt/1` →
+  `/webhooks/evt%2F1` — tak samo jak w `Location` i `status_url`.
+- Nieznany klucz → `404`.
 
 Przykład (`curl -s localhost:8000/webhooks/evt-001` po zakończeniu):
 
@@ -175,43 +205,76 @@ Przykład (`curl -s localhost:8000/webhooks/evt-001` po zakończeniu):
 | Endpoint | Proces | Znaczenie |
 |---|---|---|
 | `GET /health` | api | liveness: proces odpowiada |
-| `GET /ready` | api | readiness: baza odpowiada na zapytanie i schemat istnieje; inaczej `503` z listą `failed`. **Nie zależy od workerów** ([dlaczego](tradeoffs.md#readiness-api-niezależne-od-workera)) |
+| `GET /ready` | api | readiness: baza odpowiada i schemat istnieje |
 | `GET /metrics` | api | Prometheus, w tym gauge'e kolejki |
-| `GET /health` (port 9100) | worker | pętla workera działa i wykonała iterację w ciągu ostatnich 10 × `POLL_INTERVAL_SECONDS`; używany przez healthcheck Dockera |
+| `GET /health` (port 9100) | worker | pętla workera wykonała iterację w ciągu 10 × `POLL_INTERVAL_SECONDS` |
 | `GET /metrics` (port 9100) | worker | metryki przetwarzania tego workera |
+
+Uwagi do tabeli:
+
+- `/ready` w razie problemu zwraca `503` z listą `failed`. **Nie zależy od
+  workerów** ([dlaczego](tradeoffs.md#readiness-api-niezależne-od-workera)).
+- `/health` workera odpytuje healthcheck Dockera.
 
 ## Przejścia statusów
 
 | Przejście | Kiedy dokładnie |
 |---|---|
-| → `pending` | w transakcji zapisu nowego zdarzenia, przed `202`; `run_at = now`, `attempts = 0` |
-| `pending`/`retrying` → `processing` | worker atomowo rezerwuje porcję: jeden `UPDATE … WHERE id IN (SELECT id … WHERE status IN ('pending','retrying') AND run_at <= now ORDER BY run_at LIMIT k) RETURNING *`; `run_at = now + LEASE_SECONDS`, `attempts += 1` |
-| `processing` → `completed` | sukces; zapis wyniku, statusu i `finished_at` jedną instrukcją z kontrolą numeru próby |
-| `processing` → `retrying` | błąd i `attempts < MAX_ATTEMPTS`; `run_at = now + odstęp`, `last_error` zapisany |
-| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; stan końcowy |
-| `processing` → `retrying` / `failed` (odzyskanie rezerwacji) | `run_at <= now` przy `processing` — worker padł; `last_error = "lease expired"`; wykonywane przez każdy worker przed rezerwacją (`webhook_lease_recoveries_total`) |
+| → `pending` | zapis nowego zdarzenia, w tej samej transakcji, przed `202`; ustawia `run_at = now`, `attempts = 0` |
+| `pending`/`retrying` → `processing` | worker atomowo rezerwuje porcję (zapytanie niżej); ustawia `run_at = now + LEASE_SECONDS`, `attempts += 1` |
+| `processing` → `completed` | sukces; wynik, status i `finished_at` zapisuje jedna instrukcja z kontrolą numeru próby |
+| `processing` → `retrying` | błąd przy `attempts < MAX_ATTEMPTS`; ustawia `run_at = now + odstęp` i zapisuje `last_error` |
+| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; to stan końcowy |
+| `processing` → `retrying` / `failed` | rezerwacja wygasła (`run_at <= now`), bo worker padł; ustawia `last_error = "lease expired"` |
 
-`run_at` łączy dwa terminy (wzorzec „visibility timeout”, jak w SQS): dla
-`pending`/`retrying` to moment, od którego wolno podjąć zdarzenie; dla
-`processing` — moment wygaśnięcia rezerwacji.
+Rezerwacja to jedno zapytanie:
+
+```sql
+UPDATE … WHERE id IN (SELECT id … WHERE status IN ('pending','retrying')
+  AND run_at <= now ORDER BY run_at LIMIT k) RETURNING *
+```
+
+Odzyskanie rezerwacji wykonuje każdy worker przed rezerwacją
+(`webhook_lease_recoveries_total`).
+
+**`run_at` łączy dwa terminy** (wzorzec „visibility timeout”, jak w SQS):
+
+- dla `pending`/`retrying` to moment, od którego wolno podjąć zdarzenie,
+- dla `processing` — moment wygaśnięcia rezerwacji.
 
 ## Obserwowalność
 
 ### Metryki
 
-API (`curl -s localhost:8000/metrics | grep ^webhook`):
+#### API
+
+`curl -s localhost:8000/metrics | grep ^webhook`:
 
 | Metryka | Znaczenie |
 |---|---|
-| `webhooks_received_total{source, outcome}` | `outcome` = `accepted`, `duplicate`, `rate_limited`, `backpressure`, `db_busy`, `invalid`; `413` nie jest liczone |
-| `webhook_queue_depth{status}` | liczba zdarzeń `pending`, `retrying`, `processing` (stanów końcowych nie liczymy — wymagałoby to skanu tabeli) |
-| `webhook_queue_oldest_pending_age_seconds` | wiek najstarszej pracy **należnej i niepodjętej** (`pending`/`retrying` z `run_at <= now` oraz `processing` z wygasłą rezerwacją); liczony od `run_at`, więc odstęp ponowienia nie daje fałszywych alarmów. Z działającymi workerami ≈ 0; bez workerów rośnie liniowo — **najważniejszy sygnał „nikt nie przetwarza”** |
+| `webhooks_received_total{source, outcome}` | `outcome` = `accepted`, `duplicate`, `rate_limited`, `backpressure`, `db_busy`, `invalid` |
+| `webhook_queue_depth{status}` | liczba zdarzeń `pending`, `retrying`, `processing` |
+| `webhook_queue_oldest_pending_age_seconds` | wiek najstarszej pracy **należnej i niepodjętej** |
+
+Uwagi do tabeli:
+
+- `413` nie jest liczone w `webhooks_received_total`.
+- Stanów końcowych w `webhook_queue_depth` nie liczymy — wymagałoby to
+  skanu tabeli.
+- `webhook_queue_oldest_pending_age_seconds`:
+  - obejmuje `pending`/`retrying` z `run_at <= now` oraz `processing` z
+    wygasłą rezerwacją,
+  - liczony od `run_at`, więc odstęp ponowienia nie daje fałszywych
+    alarmów,
+  - z działającymi workerami ≈ 0; bez workerów rośnie liniowo —
+    **najważniejszy sygnał „nikt nie przetwarza”**.
 
 Gauge'e czytają cache odświeżany co ~1 s (ten sam, którego używa
-backpressure), więc scrape nie wykonuje zapytań do bazy.
+backpressure), więc odczyt metryk nie wykonuje zapytań do bazy.
 
-Worker (port 9100 w sieci compose; w trybie `EMBEDDED_WORKER` na
-`/metrics` API):
+#### Worker
+
+Port 9100 w sieci compose; w trybie `EMBEDDED_WORKER` na `/metrics` API.
 
 | Metryka | Znaczenie |
 |---|---|
@@ -253,28 +316,36 @@ curl -s localhost:8889/metrics | grep '^webhook_attempts_total'
 # webhook_attempts_total{instance="05f377d57b85-7",job="webhook-worker",...,outcome="success"} 42
 ```
 
-Seria, której żaden proces nie odświeżył przez 30 s
+**Wygasanie serii.** Seria, której żaden proces nie odświeżył przez 30 s
 (`metric_expiration`), znika z endpointu. Lokalne `/metrics` (API i
 worker :9100) działają dalej — test obciążeniowy próbkuje `/metrics` API.
 
-Collector nie przechowuje historii — to tylko punkt zbiorczy do
-odpytywania przez Prometheus (Prometheus/Grafana →
-[TODO](../README.md#todo)). Obraz jest distroless (bez powłoki), więc nie
-ma healthchecka; API startuje po `service_started` Collectora. Gdy
-Collector nie działa, eksportery OTLP w tle ponawiają wysyłkę, a potem
-odrzucają dane — żądania na nie nie czekają. Czeka tylko końcowe
-wypchnięcie przy zamykaniu, ograniczone przez `OTEL_EXPORTER_OTLP_TIMEOUT`
-(w compose 3 s).
+**Ograniczenia:**
+
+- Collector nie przechowuje historii — to tylko punkt zbiorczy do
+  odpytywania przez Prometheus (Prometheus/Grafana →
+  [TODO](../README.md#todo)).
+- Obraz jest distroless (bez powłoki), więc nie ma healthchecka; API
+  startuje po `service_started` Collectora.
+
+**Gdy Collector nie działa:**
+
+- eksportery OTLP w tle ponawiają wysyłkę, a potem odrzucają dane —
+  żądania na nie nie czekają,
+- czeka tylko końcowe wypchnięcie przy zamykaniu, ograniczone przez
+  `OTEL_EXPORTER_OTLP_TIMEOUT` (w compose 3 s).
 
 ### Ślady (Jaeger)
 
-Compose zawiera Jaeger v2 (`jaegertracing/jaeger:2.22.0`); API i workery
-eksportują ślady przez OTLP do Collectora, a ten do Jaegera. UI: <http://localhost:16686>, usługi
-`webhook-api` i `webhook-worker`. Jeden ślad zawiera span `POST /webhooks`
-i jako jego dzieci spany `webhook.process` — po jednym na każdą próbę
-(atrybuty `attempt`, `idempotency_key`, `source`, `event_type`,
-`worker.id`, `outcome`; nigdy payload). Spany `/health`, `/ready` i
-`/metrics` są wyłączone.
+Compose zawiera Jaeger v2 (`jaegertracing/jaeger:2.22.0`). API i workery
+eksportują ślady przez OTLP do Collectora, a ten do Jaegera.
+
+- UI: <http://localhost:16686>, usługi `webhook-api` i `webhook-worker`.
+- Jeden ślad zawiera span `POST /webhooks` i jako jego dzieci spany
+  `webhook.process` — po jednym na każdą próbę.
+- Atrybuty `webhook.process`: `attempt`, `idempotency_key`, `source`,
+  `event_type`, `worker.id`, `outcome`; nigdy payload.
+- Spany `/health`, `/ready` i `/metrics` są wyłączone.
 
 API Jaegera v2 jest pod `/api/v3/…` (stare `/api/services` daje `404`):
 
@@ -283,9 +354,9 @@ curl -s localhost:16686/api/v3/services
 # m.in. "webhook-api", "webhook-worker" (czasem także "jaeger")
 ```
 
-Ślad konkretnego zdarzenia: identyfikator śladu to znaki 4–35 kolumny
-`traceparent` (format W3C `00-<trace_id>-<span_id>-01`), więc link do UI
-daje zapytanie ([jak je uruchomić](#sqlite-dla-operatora)):
+**Ślad konkretnego zdarzenia.** Identyfikator śladu to znaki 4–35 kolumny
+`traceparent` (format W3C `00-<trace_id>-<span_id>-01`). Link do UI daje
+więc zapytanie ([jak je uruchomić](#sqlite-dla-operatora)):
 
 ```sql
 SELECT 'http://localhost:16686/trace/' || substr(traceparent, 4, 32)
@@ -294,14 +365,18 @@ FROM webhook_events WHERE idempotency_key = 'evt-001';
 
 ### Logi
 
-Strukturalny JSON na stdout (spany eksportera konsolowego, jeśli włączony,
-na stderr). Każdy wpis ma `trace_id` i `span_id` (do wyszukania w
-Jaegerze), a wpisy o zdarzeniach także `event` oraz — zależnie od rodzaju —
-`idempotency_key`, `source`, `worker_id`, `attempt`; wartości `event`:
-`accepted`, `duplicate`, `rate_limited`, `backpressure`, `db_busy`,
-`invalid`, `claimed`, `attempt`, `lease_recovered`, `stale_result`,
-`retention`. Payload i wynik nigdy nie trafiają do logów. Log dostępu
-uvicorna jest wyłączony (żądania opisują wpisy `event` i ślady).
+Strukturalny JSON na stdout (spany eksportera konsolowego, jeśli
+włączony, na stderr).
+
+- Każdy wpis ma `trace_id` i `span_id` (do wyszukania w Jaegerze).
+- Wpisy o zdarzeniach mają także `event` oraz — zależnie od rodzaju —
+  `idempotency_key`, `source`, `worker_id`, `attempt`.
+- Wartości `event`: `accepted`, `duplicate`, `rate_limited`,
+  `backpressure`, `db_busy`, `invalid`, `claimed`, `attempt`,
+  `lease_recovered`, `stale_result`, `retention`.
+- Payload i wynik nigdy nie trafiają do logów.
+- Log dostępu uvicorna jest wyłączony (żądania opisują wpisy `event` i
+  ślady).
 
 ```bash
 docker compose logs --no-log-prefix api | grep '"idempotency_key": "evt-001"'
@@ -331,22 +406,25 @@ liczby workerów nie widać w metrykach API. Źródła:
    - W trybie `EMBEDDED_WORKER` seria ma `job="webhook-api"`.
 2. **`docker compose ps worker`** — liczba kontenerów workera w stanie
    `(healthy)`; healthcheck odpytuje `/health` workera co 5 s.
-3. `/health` konkretnego workera:
+3. **`/health` konkretnego workera:**
    ```bash
    docker compose exec --index 2 worker python -c \
      "import urllib.request; print(urllib.request.urlopen('http://localhost:9100/health').read())"
    ```
-4. Pod obciążeniem `webhook_queue_depth{status="processing"}` ≈ liczba
-   workerów × 20 (w teście `steady` i `burst`: 60 przy 3 workerach).
-5. `webhook_queue_oldest_pending_age_seconds` rosnący mimo „zdrowych”
+4. **Pod obciążeniem** `webhook_queue_depth{status="processing"}` ≈
+   liczba workerów × 20 (w teście `steady` i `burst`: 60 przy 3
+   workerach).
+5. **`webhook_queue_oldest_pending_age_seconds` rosnący** mimo „zdrowych”
    kontenerów = workery nie nadążają albo nie przetwarzają.
-6. Rozkład pracy między workery w bazie: zapytanie po
+6. **Rozkład pracy między workery w bazie:** zapytanie po
    `json_extract(result_json, '$.processed_by')` w następnej sekcji.
 
 ## SQLite dla operatora
 
-**W devcontainerze** (jest `sqlite3` CLI; plik wolumenu należy do roota
-demona docker-in-docker). Tryb `mode=ro` — tylko odczyt:
+### Jak otworzyć bazę
+
+**W devcontainerze** jest `sqlite3` CLI. Plik wolumenu należy do roota
+demona docker-in-docker. Tryb `mode=ro` — tylko odczyt:
 
 ```bash
 DB="$(docker volume inspect -f '{{ .Mountpoint }}' zadanie-webhook-receiver_webhook-data)/webhooks.db"
@@ -355,16 +433,18 @@ sudo sqlite3 -header -box "file:$DB?mode=ro" \
 ```
 
 **Na dowolnym hoście** (bez `sqlite3` na hoście; na macOS wolumen jest w
-maszynie wirtualnej) — moduł `sqlite3` Pythona w kontenerze. Obsługuje SQL,
-ale z poleceń z kropką tylko `.help` i `.quit`:
+maszynie wirtualnej) — moduł `sqlite3` Pythona w kontenerze. Obsługuje
+SQL, ale z poleceń z kropką tylko `.help` i `.quit`:
 
 ```bash
 docker compose exec api python -m sqlite3 /data/webhooks.db \
   "SELECT status, COUNT(*) FROM webhook_events GROUP BY status"
 ```
 
-Zapytania (czasy w bazie to INTEGER, ms od epoki — podgląd przez
-`datetime(col/1000, 'unixepoch')`):
+### Zapytania
+
+Czasy w bazie to INTEGER, ms od epoki — podgląd przez
+`datetime(col/1000, 'unixepoch')`.
 
 ```sql
 -- zdarzenia failed
@@ -396,8 +476,10 @@ SELECT 'http://localhost:16686/trace/' || substr(traceparent, 4, 32)
 FROM webhook_events WHERE idempotency_key = 'evt-001';
 ```
 
-**Spójna kopia bazy** do analizy poza produkcją — API kopii zapasowej
-SQLite (bezpieczne przy działającym systemie):
+### Spójna kopia bazy
+
+Do analizy poza produkcją — API kopii zapasowej SQLite (bezpieczne przy
+działającym systemie):
 
 ```bash
 sudo sqlite3 "file:$DB?mode=ro" ".backup /tmp/webhooks-copy.db"     # devcontainer
@@ -406,14 +488,22 @@ docker compose exec api python -c "import sqlite3; \
 docker compose cp api:/tmp/copy.db ./webhooks-copy.db              # dowolny host
 ```
 
-**Uwaga:** nie otwieraj na żywej bazie długich transakcji zapisujących
-(np. ręcznego `BEGIN; UPDATE …` bez szybkiego `COMMIT`). SQLite ma jednego
-pisarza naraz: taka transakcja blokuje zapis zdarzeń, a po `busy_timeout`
-(5 s) API zaczyna odpowiadać `503`, a workery logują `worker turn failed`.
+### Uwaga: długie transakcje
+
+Nie otwieraj na żywej bazie długich transakcji zapisujących (np. ręcznego
+`BEGIN; UPDATE …` bez szybkiego `COMMIT`).
+
+SQLite ma jednego pisarza naraz: taka transakcja blokuje zapis zdarzeń.
+Po `busy_timeout` (5 s):
+
+- API zaczyna odpowiadać `503`,
+- workery logują `worker turn failed`.
 
 ## Testy, test obciążeniowy, benchmarki
 
-**Testy i linter** (te same kroki co w CI):
+### Testy i linter
+
+Te same kroki co w CI:
 
 ```bash
 uv sync --extra dev
@@ -422,41 +512,68 @@ uv run ruff format --check .
 uv run pytest            # unit + integration, pokrycie pakietu, próg 85%
 ```
 
-Testy są deterministyczne (wstrzykiwany zegar, osobna baza na test) i
-obejmują m.in. pięć webhooków z treści zadania, duplikaty, kody z tabeli
-API, atomową rezerwację, kontrolę numeru próby, odzyskanie rezerwacji
-(„restart”), retencję, propagację `traceparent` i plany zapytań
-(`EXPLAIN QUERY PLAN` bez `SCAN` tabeli). CI (GitHub Actions) uruchamia
-ruff, pytest z progiem pokrycia 85% i `docker build` obrazu.
+Testy są deterministyczne (wstrzykiwany zegar, osobna baza na test).
+Obejmują m.in.:
 
-**Test obciążeniowy** — generator asyncio + httpx z modelem otwartym (stałe
-tempo napływu, niezależne od czasu odpowiedzi), 5 wartości `X-Source`,
-uruchamiany jako kontener (profil compose `loadtest`), na świeżym stosie:
+- pięć webhooków z treści zadania,
+- duplikaty i kody z tabeli API,
+- atomową rezerwację i kontrolę numeru próby,
+- odzyskanie rezerwacji („restart”),
+- retencję,
+- propagację `traceparent`,
+- plany zapytań (`EXPLAIN QUERY PLAN` bez `SCAN` tabeli).
+
+CI (GitHub Actions) uruchamia ruff, pytest z progiem pokrycia 85% i
+`docker build` obrazu.
+
+### Test obciążeniowy
+
+Generator asyncio + httpx:
+
+- model otwarty (stałe tempo napływu, niezależne od czasu odpowiedzi),
+- 5 wartości `X-Source`,
+- uruchamiany jako kontener (profil compose `loadtest`), na świeżym
+  stosie.
 
 ```bash
 docker compose down -v && docker compose up -d --build --wait
-docker compose run --rm -T loadtest steady > results/steady.txt   # ~3 min
+docker compose run --rm -T loadtest steady > docs/results/steady.txt  # ~3 min
 docker compose down -v && docker compose up -d --build --wait
-docker compose run --rm -T loadtest burst > results/burst.txt     # ~6–7 min
-bash scripts/scaling.sh                                           # N = 1, 2, 3; ~10 min
+docker compose run --rm -T loadtest burst > docs/results/burst.txt    # ~6–7 min
+bash loadtest/scaling.sh                                              # N = 1, 2, 3; ~10 min
 ```
 
-Wszystkie tempa, czasy i progi to flagi (`docker compose run --rm loadtest
-steady --help`). `scripts/scaling.sh` działa po stronie hosta (kontener
-generatora celowo nie ma dostępu do Dockera): dla każdego N robi
-`docker compose down -v`, `up --scale worker=N`, zalewa kolejkę i zapisuje
-`results/scaling-N.json`, `results/scaling-N-observations.txt` oraz
-`results/scaling-report.txt`. Próbny przebieg bez nadpisywania wyników:
-`RESULTS_DIR=/tmp/scaling FLOOD_ARGS="--count 300 --warmup 2 --measure 10" bash scripts/scaling.sh 1`.
+Wszystkie tempa, czasy i progi to flagi (`docker compose run --rm
+loadtest steady --help`).
 
-**Benchmarki SQLite** (ręcznie, poza CI — wyniki na współdzielonych
-maszynach GitHuba są zbyt zaszumione), na nazwanym wolumenie jak baza
-produkcyjna, ~10 min:
+**`loadtest/scaling.sh`** działa po stronie hosta (kontener generatora
+celowo nie ma dostępu do Dockera). Dla każdego N:
+
+1. `docker compose down -v`,
+2. `up --scale worker=N`,
+3. zalewa kolejkę,
+4. zapisuje `docs/results/scaling-N.json` i
+   `docs/results/scaling-N-observations.txt`.
+
+Na końcu zapisuje `docs/results/scaling-report.txt`.
+
+Próbny przebieg bez nadpisywania wyników:
+
+```bash
+RESULTS_DIR=/tmp/scaling FLOOD_ARGS="--count 300 --warmup 2 --measure 10" bash loadtest/scaling.sh 1
+```
+
+### Benchmarki SQLite
+
+- Uruchamiane ręcznie, poza CI — wyniki na współdzielonych maszynach
+  GitHuba są zbyt zaszumione.
+- Na nazwanym wolumenie, jak baza produkcyjna.
+- Czas: ~10 min.
 
 ```bash
 docker compose run --rm --no-deps -T -v bench-data:/data --entrypoint python \
   loadtest -W error -m benchmarks.sqlite_bench all --dir /data/bench --repeat 5 \
-  > results/benchmarks.txt
+  > docs/results/benchmarks.txt
 docker volume rm bench-data        # wolumen spoza projektu compose
 ```
 

@@ -671,7 +671,7 @@ się lekko wahać — kryteria dotyczą przyjmowania.
 przebieg na 3×20 pokazuje tylko, że ta konfiguracja wystarcza):
 
 - dla N = 1, 2, 3 workerów (po 20 slotów), każdy przebieg na czystej bazie;
-- orkiestracja: **skrypt po stronie hosta** (`scripts/scaling.sh`), który
+- orkiestracja: **skrypt po stronie hosta** (`loadtest/scaling.sh`), który
   dla każdego N robi `docker compose down -v`, `up --scale worker=N` i
   uruchamia kontener generatora (profil `loadtest`); sam kontener nie ma
   dostępu do demona Dockera (celowo) [decyzja projektanta, po recenzji];
@@ -768,7 +768,7 @@ Narzędzie: pytest. Kluczowe obszary:
   compose); healthchecki przez `python -c "urllib.request…"` (obraz
   `python:3.14-slim` nie ma `curl` ani `wget`); `stop_grace_period: 20s`
   dla workera.
-- `scripts/scaling.sh` — orkiestracja scenariusza `scaling` (§13).
+- `loadtest/scaling.sh` — orkiestracja scenariusza `scaling` (§13).
 - Zmiana devcontainera: obraz `mcr.microsoft.com/devcontainers/python:3.14-trixie`
   i feature `docker-in-docker` (jedna przebudowa).
 - **Przenośność Dockera** [ustalone]: `Dockerfile` i `docker-compose.yml`

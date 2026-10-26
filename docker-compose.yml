@@ -82,7 +82,7 @@ services:
 
   # Load generator (spec §13); only with `--profile loadtest` or
   # `docker compose run loadtest ...`. No Docker socket on purpose:
-  # scripts/scaling.sh orchestrates from the host.
+  # loadtest/scaling.sh orchestrates from the host.
   loadtest:
     image: webhook-receiver:local
     profiles: ["loadtest"]

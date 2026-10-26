@@ -33,6 +33,7 @@ Jaegerze, metryki Prometheus, logi JSON).
 - [Kompromisy (tradeoffy)](#kompromisy-tradeoffy)
 - [TODO](#todo)
 - [Struktura repozytorium i dokumenty](#struktura-repozytorium-i-dokumenty)
+- [Jak powstał projekt](#jak-powstał-projekt)
 
 ## W skrócie
 
@@ -87,6 +88,8 @@ flowchart LR
 - **Ślad** przechodzi przez granicę procesów. API zapisuje W3C
   `traceparent` w wierszu zdarzenia, a worker tworzy z niego span
   `webhook.process` dla każdej próby.
+- **Kod wspólny:** `api` i `worker` importują tylko z `common` (pilnuje
+  tego test architektury).
 
 ## Co naprawdę gwarantujemy („dokładnie raz”)
 
@@ -237,7 +240,7 @@ Ponowienia (`payload.simulate`: `fail_once`, `fail_always`) i rate limiting →
 
 - nagłówek `X-Source` (1–64 znaki),
 - body `{"idempotency_key", "event_type", "payload"}`,
-- `idempotency_key`: niepusty string do 255 znaków, globalnie unikalny.
+- `idempotency_key`: niepusty napis do 255 znaków, globalnie unikalny.
 
 **`GET /webhooks/{idempotency_key}`** zwraca status zdarzenia.
 
@@ -350,6 +353,17 @@ devcontainer z docker-in-docker, wolumen btrfs.
 
 Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md).
 
+> **Kiedy mierzono.** Test obciążeniowy (`steady`, `burst`, `scaling`)
+> wykonano **przed dodaniem OpenTelemetry Collectora**. Ślady szły wtedy
+> prosto do Jaegera, a metryki były tylko wystawiane na `/metrics` (bez
+> wypychania przez OTLP) — oraz **przed poprawkami z końcowej recenzji**
+> (pula połączeń, indeks czyszczenia payloadu, wyłączony log dostępu).
+> Z Collectorem powtórzono jedynie krótki `steady` (`--minutes 0.1`:
+> 100/100 `completed`, p99 16,8 ms, PASS).
+>
+> Benchmarków SQLite to nie dotyczy: nie używają sieci ani telemetrii.
+> Uruchomiono je ponownie po poprawkach z końcowej recenzji.
+
 ### Test obciążeniowy
 
 | Scenariusz | Ruch | p99 `POST` | Wynik |
@@ -360,7 +374,7 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 
 ### Benchmarki SQLite
 
-Źródło: [`results/benchmarks.txt`](results/benchmarks.txt).
+Źródło: [`docs/results/benchmarks.txt`](docs/results/benchmarks.txt).
 
 - **`synchronous=FULL` kosztuje ok. 2 ms na zapis przy 100 tx/s**
   (mediana 1,998 ms; bez przerw 0,442 ms). `NORMAL`: 0,195 ms.
@@ -439,12 +453,18 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
   Są przyjmowane, ale `GET` przez ścieżkę ich nie odpyta (normalizacja
   segmentów).
   [Więcej](docs/tradeoffs.md#klucze--i-)
+- **Logi JSON na stdout, zapisywane synchronicznie.**
+  Logi zbiera Docker (12-factor). Zapis odbywa się w ścieżce żądania i
+  próby workera, więc duża liczba wpisów kosztuje czas i CPU, a sterownik
+  `json-file` dokłada I/O. Test obciążeniowy z takimi logami spełnił
+  kryteria, ale ich kosztu nie mierzyliśmy osobno.
+  [Więcej](docs/tradeoffs.md#logi-json-na-stdout-zapisywane-synchronicznie)
 
 ## TODO
 
 - **Format `idempotency_key`:** doprecyzować z nadawcami (zestaw znaków,
   długość, struktura) i wybrać rozwiązanie:
-  - obecne (dowolny string + kodowanie procentowe),
+  - obecne (dowolny napis + kodowanie procentowe),
   - ograniczony zestaw znaków,
   - klucz poza ścieżką (parametr zapytania / wewnętrzny identyfikator).
 
@@ -473,6 +493,9 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
   kodzie).
 - **Metryki:** liczyć odrzucenia `413`; osobna metryka awarii wbudowanego
   workera (`EMBEDDED_WORKER`; dziś tylko log).
+- **Logi poza ścieżką żądania:** zapis asynchroniczny
+  (`QueueHandler`/`QueueListener`), plik z rotacją albo logi OTLP przez
+  Collector, próbkowanie częstych wpisów; zmierzyć wpływ na opóźnienia.
 - **Pomiary:** użyteczny pułap zapisu przy p99 < 100 ms; pomiary na
   serwerze z Linuksem, bez warstwy wirtualizacji macOS.
 
@@ -480,22 +503,47 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
 
 ```
 src/webhook_receiver/
-  __main__.py   python -m webhook_receiver api|worker (tryb EMBEDDED_WORKER)
-  common/       config, clock, models, db (schemat, pragmy), repository (SQL), telemetry, logging
-  api/          app.py (create_app), schemas, body_limit, ratelimit, queue_stats
-  worker/       app.py (create_worker), http (/health, /metrics), backoff, simulation
-tests/          unit/, integration/, loadtest/
-loadtest/       generator obciążenia (steady, burst, flood, scaling-report)
-benchmarks/     benchmarki SQLite (sync, claim, contention, retention)
-scripts/        scaling.sh
-results/        wyniki testu obciążeniowego i benchmarków
-docs/           configuration.md, operations.md, results.md, tradeoffs.md, superpowers/specs/, superpowers/plans/
+  __main__.py        python -m webhook_receiver api|worker (tryb EMBEDDED_WORKER)
+  common/            config, clock, models, db (schemat, pragmy), repository (SQL), telemetry, logging
+  api/               app.py (create_app), schemas, body_limit, ratelimit, queue_stats
+  worker/            app.py (create_worker), http (/health, /metrics), backoff, simulation
+tests/               unit/, integration/, loadtest/
+loadtest/            generator obciążenia (steady, burst, flood, scaling-report)
+  scaling.sh         scenariusz scaling: N = 1, 2, 3 workerów, uruchamiany na hoście
+benchmarks/          benchmarki SQLite (sync, claim, contention, retention)
+docs/                configuration.md, operations.md, results.md, tradeoffs.md
+  results/           surowe wyniki testu obciążeniowego i benchmarków
+  superpowers/       dokument projektowy, zapis brainstormingu, plan implementacji
+Dockerfile           jeden obraz dla api i workera, użytkownik inny niż root
+docker-compose.yml   api, workery, Collector, Jaeger, profil loadtest
+otel-collector.yaml  konfiguracja OpenTelemetry Collectora
 ```
 
-- `otel-collector.yaml` — konfiguracja Collectora.
-- `api` i `worker` importują tylko z `common` (pilnuje tego test
-  architektury).
-- Jeden obraz Dockera, dwie komendy, użytkownik inny niż root.
-- Pełne uzasadnienia decyzji:
-  [dokument projektowy](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md)
-  i [zapis brainstormingu](docs/superpowers/specs/2026-10-25-webhook-receiver-brainstorming.md).
+## Jak powstał projekt
+
+Projekt zaprojektowano i zbudowano w Claude Code, według procesu ze
+zbioru umiejętności [superpowers](https://github.com/obra/superpowers).
+Modele Claude:
+
+- **Opus** — koordynacja pracy, recenzje od zadania 4, implementacja od
+  zadania 5 (zadanie 0 implementował Haiku, a recenzował Sonnet; zadania
+  1–4 implementował Sonnet);
+- **Fable** — recenzja dokumentu projektowego i końcowa recenzja całego
+  repozytorium.
+
+Przebieg:
+
+1. Brainstorming z autorem: wymagania, warianty, decyzje.
+2. Dokument projektowy.
+3. Plan implementacji podzielony na zadania.
+4. Każde zadanie implementuje jeden subagent, a recenzuje drugi.
+   Poprawki trwają, aż recenzja nie ma uwag.
+5. Jeden PR na zadanie; autor go przegląda i scala (od zadania 1 — PR
+   zadania 0 scalił koordynator).
+6. Na końcu recenzja całego repozytorium.
+
+Dokumenty:
+
+- [dokument projektowy](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md)
+- [zapis brainstormingu (dziennik decyzji)](docs/superpowers/specs/2026-10-25-webhook-receiver-brainstorming.md)
+- [plan implementacji](docs/superpowers/plans/2026-10-25-webhook-receiver.md)

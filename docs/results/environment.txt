@@ -16,7 +16,7 @@ jaeger: jaegertracing/jaeger:2.22.0 (OTLP traces exported during runs)
 topology: api x1, worker x3 x WORKER_CONCURRENCY=20 (steady, burst); worker x N=1,2,3 (scaling)
 git base: f76ba79
 
-# SQLite benchmark environment (results/benchmarks.txt, 2026-10-26)
+# SQLite benchmark environment (docs/results/benchmarks.txt, 2026-10-26)
 host: same as the load test (Apple Silicon, 10 cores, OrbStack Linux VM, devcontainer with docker-in-docker)
 command: docker compose run --rm --no-deps -T -v bench-data:/data --entrypoint python loadtest -W error -m benchmarks.sqlite_bench all --dir /data/bench --repeat 5
 storage: Docker named volume bench-data at /data (same kind as webhook-data); df -T: /dev/vdb1 btrfs (docker root on overlayfs)
