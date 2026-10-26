@@ -595,18 +595,30 @@ build SQLite).
   - Bazowo: `docker compose ps` — liczba kontenerów workera w stanie
     `healthy` (healthcheck na ich `/health`); pośrednio pod obciążeniem
     `webhook_queue_depth{status="processing"}` ≈ liczba workerów × 20.
-    Ograniczenie: liczby workerów nie widać w żadnej metryce, a metryki
-    workerów (port 9100) nie są zbierane centralnie.
-  - **Rozszerzenie opcjonalne — OpenTelemetry Collector w compose**
-    [ustalone: rozszerzenie albo TODO, **decyzja w trakcie
-    implementacji**]: API i workery wysyłają metryki (i ślady) przez OTLP do
-    Collectora, który wystawia jeden zbiorczy endpoint Prometheus i
-    przekazuje ślady do Jaegera; każdy worker raportuje gauge
-    `webhook_worker_up` z `service.instance.id`, więc liczba workerów =
-    liczba serii. Realizowane jako ostatnie, opcjonalne zadanie planu —
-    jeśli zostanie pominięte, trafia do TODO.
-  - README opisuje, jak sprawdzić liczbę workerów w wariancie, który
-    zostanie zrealizowany.
+  - **OpenTelemetry Collector w compose** [ustalone — Task 17,
+    zrealizowane]: obraz `otel/opentelemetry-collector-contrib:0.163.2`,
+    konfiguracja `otel-collector.yaml`. API i workery wysyłają ślady i
+    metryki przez OTLP/HTTP do Collectora (`otel-collector:4318`;
+    `OTEL_METRICS_EXPORTER=otlp`, `OTEL_METRIC_EXPORT_INTERVAL=5000` ms).
+    Collector przekazuje ślady do Jaegera (OTLP gRPC `jaeger:4317`) i
+    wystawia jeden zbiorczy endpoint Prometheus na porcie **8889**
+    (`COLLECTOR_METRICS_PORT`). Eksporter mapuje `service.name` → `job`, a
+    `service.instance.id` → `instance`.
+  - Każdy proces workera raportuje gauge `webhook_worker_up` = 1 bez
+    atrybutów; tożsamość daje zasób (`instance="<hostname>-<pid>"`,
+    `job="webhook-worker"`), więc liczba workerów = liczba serii:
+    `curl -s localhost:8889/metrics | grep -c '^webhook_worker_up'`.
+  - `metric_expiration: 30s`: seria zatrzymanego (lub zabitego) workera
+    znika z endpointu ~30 s po ostatnim eksporcie. Nowy kontener
+    (`--scale`, ponowne utworzenie) może przez ≤ 30 s zawyżać licznik o 1;
+    restart w miejscu zachowuje ten sam `instance` (ten sam hostname, ten
+    sam PID pod tini).
+    W trybie `EMBEDDED_WORKER` seria pochodzi z procesu API
+    (`job="webhook-api"`).
+  - Lokalne `/metrics` (API, worker :9100) działają bez zmian — czytnik
+    Prometheus zostaje obok eksportu OTLP; test obciążeniowy próbkuje
+    nadal `/metrics` API. Bez `OTEL_METRICS_EXPORTER=otlp` (np. poza
+    compose) metryki nie są wypychane.
 
 ## 13. Test obciążeniowy
 

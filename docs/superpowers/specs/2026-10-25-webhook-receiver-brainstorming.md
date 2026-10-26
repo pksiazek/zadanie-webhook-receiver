@@ -566,3 +566,16 @@ go przeżywa (log, odzyskanie rezerwacji), a `POST` odpowiadał `500`.
 `SQLITE_BUSY`/`SQLITE_LOCKED` w przyjmowaniu zdarzenia; pozostałe błędy bazy
 nadal `500`; `busy_timeout` bez zmian** — podniesienie tylko wydłużyłoby
 ogon opóźnień. Spec §6 i §12 zaktualizowane.
+
+## 35. OpenTelemetry Collector (Task 17)
+
+**Decyzja (użytkownik, 2026-10-26): Collector realizujemy, nie trafia do
+TODO.** W compose działa `otel/opentelemetry-collector-contrib:0.163.2`:
+API i workery wysyłają do niego ślady i metryki przez OTLP, ślady idą
+dalej do Jaegera, a metryki wszystkich procesów są na jednym endpoincie
+Prometheus `:8889`. Każdy worker raportuje `webhook_worker_up` = 1 z
+`instance` = `service.instance.id`, więc liczba workerów to
+`curl -s localhost:8889/metrics | grep -c '^webhook_worker_up'`; `docker
+compose ps` zostaje metodą bazową. `metric_expiration: 30s` usuwa serię
+zatrzymanego workera po ~30 s. Lokalne `/metrics` API i workera zostają —
+czytnik OTLP działa obok czytnika Prometheus. Spec §12 zaktualizowany.

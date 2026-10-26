@@ -1,5 +1,19 @@
-# api + 3 workers (x WORKER_CONCURRENCY slots) + Jaeger, sharing one
-# SQLite file on a named volume. Scale with `--scale worker=N`.
+# api + 3 workers (x WORKER_CONCURRENCY slots), sharing one SQLite file
+# on a named volume, + OpenTelemetry Collector + Jaeger. Scale with
+# `--scale worker=N`.
+
+# Traces and metrics go over OTLP to the Collector (spec §12); the local
+# /metrics endpoints stay as they were.
+# OTEL_EXPORTER_OTLP_TIMEOUT is in SECONDS in the Python SDK (1.45; the
+# OTel spec says ms) and is one deadline across all retries of an
+# export. It bounds the exit flush: SHUTDOWN_GRACE_SECONDS (10 s) +
+# final metric push (<= 3 s) + span flush (<= 3 s) ~ 16 s, inside the
+# worker's stop_grace_period of 20 s.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_EXPORTER_OTLP_TIMEOUT: "3"
+  OTEL_METRICS_EXPORTER: otlp
+  OTEL_METRIC_EXPORT_INTERVAL: "5000"
 
 x-healthcheck-timing: &healthcheck-timing
   interval: 5s
@@ -21,9 +35,9 @@ services:
     volumes:
       - webhook-data:/data
     environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      <<: *otel-env
     depends_on:
-      jaeger:
+      otel-collector:
         condition: service_started
     healthcheck:
       test:
@@ -46,8 +60,8 @@ services:
     volumes:
       - webhook-data:/data
     environment:
+      <<: *otel-env
       WORKER_CONCURRENCY: "20"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     # The API creates the schema at startup; workers start after it.
     depends_on:
       api:
@@ -79,8 +93,27 @@ services:
       api:
         condition: service_healthy
 
+  otel-collector:
+    # Distroless image (no shell, no curl): no healthcheck. The apps
+    # tolerate a Collector that is down: at runtime the OTLP exporters
+    # retry in background threads and then drop data (requests never
+    # wait on them); only the exit flush waits, bounded by
+    # OTEL_EXPORTER_OTLP_TIMEOUT. So service_started suffices.
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    restart: unless-stopped
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      # One Prometheus endpoint for all processes; see README.
+      - "${COLLECTOR_METRICS_PORT:-8889}:8889"
+    depends_on:
+      jaeger:
+        condition: service_started
+
   jaeger:
-    # Jaeger v2 all-in-one: OTLP (4317 gRPC, 4318 HTTP) is on by default.
+    # Jaeger v2 all-in-one; fed with traces by the Collector over OTLP
+    # gRPC (4317, on by default).
     image: jaegertracing/jaeger:2.22.0
     ports:
       - "${JAEGER_UI_PORT:-16686}:16686"

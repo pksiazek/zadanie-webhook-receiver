@@ -23,5 +23,6 @@ htmlcov/
 Dockerfile
 .dockerignore
 docker-compose.yml
+otel-collector.yaml
 results/
 scripts/

@@ -3,8 +3,15 @@ import sys
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+    OTLPMetricExporter,
+)
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     OTLPSpanExporter,
+)
+from opentelemetry.sdk.metrics.export import (
+    MetricExportResult,
+    PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
@@ -275,3 +282,99 @@ def test_recovered_stats_source_reports_again(caplog):
         _metrics_text()
         text = _metrics_text()
     assert 'webhook_queue_depth{status="pending"} 5.0' in text
+
+
+def test_worker_up_gauge_reports_one():
+    WorkerMetrics()
+    text = _metrics_text()
+    assert _value(text, "webhook_worker_up") == 1.0
+    assert "webhook_worker_up_ratio" not in text
+
+
+@pytest.fixture
+def fresh_setup(monkeypatch):
+    """Run ``setup_telemetry`` again, capturing the providers it builds.
+
+    The global providers can be set only once per process, so the
+    setters are replaced and the built providers shut down afterwards.
+    OTLP export is stubbed: the shutdown's final flush must never touch
+    the network, whatever instruments exist by then.
+    """
+    for name in (
+        "OTEL_METRICS_EXPORTER",
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "none")
+    monkeypatch.setattr(
+        OTLPMetricExporter,
+        "export",
+        lambda *_args, **_kwargs: MetricExportResult.SUCCESS,
+    )
+    captured = {}
+    monkeypatch.setattr(telemetry, "_configured", False)
+    monkeypatch.setattr(
+        telemetry.trace,
+        "set_tracer_provider",
+        lambda p: captured.setdefault("tracer", p),
+    )
+    monkeypatch.setattr(
+        telemetry.metrics,
+        "set_meter_provider",
+        lambda p: captured.setdefault("meter", p),
+    )
+
+    real_provider = telemetry.MeterProvider
+
+    def recording_provider(**kwargs):
+        captured["readers"] = kwargs["metric_readers"]
+        return real_provider(**kwargs)
+
+    monkeypatch.setattr(telemetry, "MeterProvider", recording_provider)
+
+    def readers():
+        setup_telemetry("fresh")
+        return captured["readers"]
+
+    yield monkeypatch, readers
+    for kind in ("tracer", "meter"):
+        if kind in captured:
+            captured[kind].shutdown()
+
+
+def _reader_types(readers):
+    return sorted(type(r).__name__ for r in readers)
+
+
+def test_setup_metrics_prometheus_only_by_default(fresh_setup):
+    _, readers = fresh_setup
+    assert _reader_types(readers()) == ["PrometheusMetricReader"]
+
+
+@pytest.mark.parametrize("value", ["none", "prometheus"])
+def test_setup_metrics_without_otlp(fresh_setup, value):
+    env, readers = fresh_setup
+    env.setenv("OTEL_METRICS_EXPORTER", value)
+    env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
+    assert _reader_types(readers()) == ["PrometheusMetricReader"]
+
+
+@pytest.mark.parametrize("value", ["otlp", " OTLP ", "prometheus,otlp"])
+def test_setup_metrics_otlp_adds_periodic_reader(fresh_setup, value):
+    env, readers = fresh_setup
+    env.setenv("OTEL_METRICS_EXPORTER", value)
+    env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
+    env.setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+    found = readers()
+    assert _reader_types(found) == [
+        "PeriodicExportingMetricReader",
+        "PrometheusMetricReader",
+    ]
+    (periodic,) = [
+        r for r in found if isinstance(r, PeriodicExportingMetricReader)
+    ]
+    assert isinstance(periodic._exporter, OTLPMetricExporter)
+    assert periodic._export_interval_millis == 3600000

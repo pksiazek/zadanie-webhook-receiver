@@ -1,0 +1,42 @@
+# OpenTelemetry Collector (spec §12): the API and workers push traces
+# and metrics over OTLP; traces go on to Jaeger, metrics are served on
+# one Prometheus endpoint (:8889) for all processes.
+#
+# The prometheus exporter maps service.name -> `job` and
+# service.instance.id -> `instance`, so each worker process is its own
+# `webhook_worker_up` series. A series not refreshed for
+# metric_expiration (a stopped worker) disappears from the endpoint.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+  batch: {}
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    metric_expiration: 30s
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
