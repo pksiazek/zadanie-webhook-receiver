@@ -1,6 +1,8 @@
 import logging
 import threading
 
+import pytest
+
 from webhook_receiver.api.queue_stats import QueueStatsCache
 from webhook_receiver.common.models import QueueStats
 
@@ -92,3 +94,15 @@ def test_stop_is_prompt_with_long_interval(repo):
 
 def test_stop_without_start_is_noop(repo):
     QueueStatsCache(repo, 1).stop()
+
+
+def test_second_start_raises(repo):
+    cache = QueueStatsCache(repo, 3600)
+    cache.start()
+    try:
+        with pytest.raises(RuntimeError):
+            cache.start()
+    finally:
+        cache.stop()
+    with pytest.raises(RuntimeError):
+        cache.start()

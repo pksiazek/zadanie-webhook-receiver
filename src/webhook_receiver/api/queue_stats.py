@@ -16,6 +16,13 @@ _ZERO = QueueStats(pending=0, retrying=0, processing=0, oldest_due_age_ms=0)
 
 
 class QueueStatsCache:
+    """Snapshot of ``repo.queue_stats()`` refreshed by a daemon thread.
+
+    The cache is one-shot: call ``start()`` once and ``stop()`` once.
+    Restarting is not supported; a second ``start()`` raises
+    ``RuntimeError`` (also after ``stop()``).
+    """
+
     def __init__(self, repo: EventRepository, refresh_seconds: float) -> None:
         if refresh_seconds <= 0:
             raise ValueError("refresh_seconds must be > 0")

@@ -196,3 +196,56 @@ def test_non_http_scope_passes_through():
     asyncio.run(mw({"type": "lifespan"}, receive, send))
     asyncio.run(mw({"type": "websocket"}, receive, send))
     assert calls == ["lifespan", "websocket"]
+
+
+def _raw_call(app, headers, chunks):
+    """Drive ``app`` with raw ASGI messages; return the response status."""
+    sent = []
+    queue = [
+        {
+            "type": "http.request",
+            "body": c,
+            "more_body": i < len(chunks) - 1,
+        }
+        for i, c in enumerate(chunks)
+    ]
+
+    async def receive():
+        if not queue:
+            raise AssertionError("body must not be read")
+        return queue.pop(0)
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": headers}
+    asyncio.run(app(scope, receive, send))
+    return sent[0]["status"]
+
+
+@pytest.mark.parametrize(
+    "value", [b" 11 ", b"11 ", b"+11", b"1_1", b"-11", b"", b"0x11", b"\xb2"]
+)
+def test_non_digit_content_length_is_ignored(seen, value):
+    # A lenient parse would read these as 11 (> 10) and reject without
+    # reading; strict parsing ignores them and the stream count decides.
+    app = _make_app(seen)
+    assert _raw_call(app, [(b"content-length", value)], [b"12345"]) == 200
+    assert seen == [b"12345"]
+
+
+def test_conflicting_content_lengths_are_ignored(seen):
+    app = _make_app(seen)
+    headers = [(b"content-length", b"11"), (b"content-length", b"5")]
+    assert _raw_call(app, headers, [b"12345"]) == 200
+    headers = [(b"content-length", b"5"), (b"content-length", b"11")]
+    assert _raw_call(app, headers, [b"12345", b"678901"]) == 413
+    assert seen == [b"12345"]
+
+
+def test_equal_duplicate_content_lengths_are_used(seen):
+    app = _make_app(seen)
+    headers = [(b"content-length", b"11"), (b"Content-Length", b"11")]
+    # No chunks queued: reading the body would raise.
+    assert _raw_call(app, headers, []) == 413
+    assert seen == []

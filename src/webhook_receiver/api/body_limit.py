@@ -20,8 +20,9 @@ class BodySizeLimitMiddleware:
     reading the body. Otherwise the body is read up front (at most
     ``max_bytes`` are buffered) and counted across ``http.request``
     messages, so chunked uploads are capped too and the wrapped app
-    never sees a partial body. A malformed ``Content-Length`` is not
-    trusted: the streaming count still enforces the limit.
+    never sees a partial body. A malformed or conflicting
+    ``Content-Length`` is not trusted: the streaming count still
+    enforces the limit.
     """
 
     def __init__(self, app: ASGIApp, max_bytes: int) -> None:
@@ -74,15 +75,25 @@ class BodySizeLimitMiddleware:
 
 
 def _content_length(scope: Scope) -> int | None:
-    """Parsed ``Content-Length``, or ``None`` if absent or malformed."""
-    for name, value in scope.get("headers", []):
-        if name.lower() == b"content-length":
-            try:
-                length = int(value)
-            except ValueError:
-                return None
-            return length if length >= 0 else None
-    return None
+    """Declared ``Content-Length``, or ``None`` if absent or unusable.
+
+    Only ASCII digits are accepted (no sign, whitespace or underscores,
+    which ``int()`` would tolerate). Several headers are used only if
+    they all agree. Anything else is ignored and the streaming count
+    enforces the limit.
+    """
+    values = {
+        value
+        for name, value in scope.get("headers", [])
+        if name.lower() == b"content-length"
+    }
+    if len(values) != 1:
+        return None
+    (value,) = values
+    # bytes.isdigit() is ASCII-only, unlike str.isdigit().
+    if not value.isdigit():
+        return None
+    return int(value)
 
 
 async def _send_413(send: Send) -> None:
