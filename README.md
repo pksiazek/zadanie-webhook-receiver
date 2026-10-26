@@ -88,6 +88,8 @@ flowchart LR
 - **Ślad** przechodzi przez granicę procesów. API zapisuje W3C
   `traceparent` w wierszu zdarzenia, a worker tworzy z niego span
   `webhook.process` dla każdej próby.
+- **Kod wspólny:** `api` i `worker` importują tylko z `common` (pilnuje
+  tego test architektury).
 
 ## Co naprawdę gwarantujemy („dokładnie raz”)
 
@@ -499,29 +501,34 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
 
 ```
 src/webhook_receiver/
-  __main__.py   python -m webhook_receiver api|worker (tryb EMBEDDED_WORKER)
-  common/       config, clock, models, db (schemat, pragmy), repository (SQL), telemetry, logging
-  api/          app.py (create_app), schemas, body_limit, ratelimit, queue_stats
-  worker/       app.py (create_worker), http (/health, /metrics), backoff, simulation
-tests/          unit/, integration/, loadtest/
-loadtest/       generator obciążenia (steady, burst, flood, scaling-report)
-  scaling.sh    scenariusz scaling: N = 1, 2, 3 workerów, uruchamiany na hoście
-benchmarks/     benchmarki SQLite (sync, claim, contention, retention)
-docs/           configuration.md, operations.md, results.md, tradeoffs.md
-  results/      surowe wyniki testu obciążeniowego i benchmarków
-  superpowers/  dokument projektowy, zapis brainstormingu, plan implementacji
-Dockerfile      jeden obraz dla api i workera, użytkownik inny niż root
-docker-compose.yml  api, workery, Collector, Jaeger, profil loadtest
-otel-collector.yaml konfiguracja OpenTelemetry Collectora
+  __main__.py        python -m webhook_receiver api|worker (tryb EMBEDDED_WORKER)
+  common/            config, clock, models, db (schemat, pragmy), repository (SQL), telemetry, logging
+  api/               app.py (create_app), schemas, body_limit, ratelimit, queue_stats
+  worker/            app.py (create_worker), http (/health, /metrics), backoff, simulation
+tests/               unit/, integration/, loadtest/
+loadtest/            generator obciążenia (steady, burst, flood, scaling-report)
+  scaling.sh         scenariusz scaling: N = 1, 2, 3 workerów, uruchamiany na hoście
+benchmarks/          benchmarki SQLite (sync, claim, contention, retention)
+docs/                configuration.md, operations.md, results.md, tradeoffs.md
+  results/           surowe wyniki testu obciążeniowego i benchmarków
+  superpowers/       dokument projektowy, zapis brainstormingu, plan implementacji
+Dockerfile           jeden obraz dla api i workera, użytkownik inny niż root
+docker-compose.yml   api, workery, Collector, Jaeger, profil loadtest
+otel-collector.yaml  konfiguracja OpenTelemetry Collectora
 ```
 
 ## Jak powstał projekt
 
 Projekt zaprojektowano i zbudowano w Claude Code, według procesu ze
 zbioru umiejętności [superpowers](https://github.com/obra/superpowers).
-Pracowały modele Claude: głównie Opus (implementacja i recenzje) oraz
-Fable (recenzja dokumentu projektowego i końcowa recenzja całego
-repozytorium).
+Modele Claude:
+
+- **Opus** — koordynacja pracy, a od zadania 5 implementacja i wszystkie
+  recenzje (zadania 0–4 implementowały Haiku i Sonnet);
+- **Fable** — recenzja dokumentu projektowego i końcowa recenzja całego
+  repozytorium.
+
+Przebieg:
 
 1. Brainstorming z autorem: wymagania, warianty, decyzje.
 2. Dokument projektowy.
