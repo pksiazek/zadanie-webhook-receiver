@@ -83,6 +83,15 @@ def _readiness(pool: ConnectionPool) -> list[str]:
     return [] if row is not None else ["schema"]
 
 
+def _is_lock_contention(exc: sqlite3.Error) -> bool:
+    """SQLITE_BUSY or SQLITE_LOCKED, extended codes included."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code is not None and code & 0xFF in (
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    )
+
+
 def _detail(status_code: int, detail: Any, **headers: str) -> JSONResponse:
     return JSONResponse(
         {"detail": detail}, status_code=status_code, headers=headers or None
@@ -128,12 +137,17 @@ def create_app(
         settings.rate_limit_max_sources,
     )
 
-    def outcome(event: str, source: str, key: str | None = None) -> None:
+    def outcome(
+        event: str,
+        source: str,
+        key: str | None = None,
+        level: int = logging.INFO,
+    ) -> None:
         app.state.metrics.received(source, event)
         extra = {"event": event, "source": source}
         if key is not None:
             extra["idempotency_key"] = key
-        _log.info("webhook %s", event, extra=extra)
+        _log.log(level, "webhook %s", event, extra=extra)
 
     def status_response(
         event: Event, duplicate: bool | None = None
@@ -144,7 +158,8 @@ def create_app(
     @app.post("/webhooks")
     async def post_webhook(request: Request) -> Response:
         # Order of checks (spec §6): size (413, middleware) -> X-Source
-        # (400) -> body (422) -> rate limit (429) -> backpressure (503).
+        # (400) -> body (422) -> rate limit (429) -> backpressure (503)
+        # -> write; lock contention at the database steps is a 503 too.
         span = trace.get_current_span()
         source = request.headers.get("x-source", "")
         # Measured on the latin-1 decoded header, i.e. in bytes for
@@ -179,6 +194,21 @@ def create_app(
                 **{"Retry-After": str(decision.retry_after_seconds)},
             )
 
+        try:
+            return await intake(source, key, webhook)
+        except sqlite3.OperationalError as exc:
+            # busy_timeout ran out; other database errors stay 500.
+            if not _is_lock_contention(exc):
+                raise
+            outcome("db_busy", source, key, logging.WARNING)
+            retry_after = settings.backpressure_retry_after_seconds
+            return _detail(
+                503,
+                "database busy, retry later",
+                **{"Retry-After": str(retry_after)},
+            )
+
+    async def intake(source: str, key: str, webhook: WebhookIn) -> Response:
         repo: EventRepository = app.state.repo
         if app.state.stats.get().backlog >= settings.max_backlog:
             existing = await run_in_threadpool(repo.get, key)

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import SpanKind, StatusCode
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.fakes import GIST_WEBHOOKS
@@ -226,6 +226,110 @@ async def test_rate_limit_is_checked_before_backpressure(client, app):
     assert r.status_code == 503
     r = await client.post("/webhooks", json=_webhook("B"), headers=SRC)
     assert r.status_code == 429
+
+
+def _sqlite_error(code: int, name: str) -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError(f"internal {name} text")
+    exc.sqlite_errorcode = code
+    exc.sqlite_errorname = name
+    return exc
+
+
+def _fail_with(exc: Exception):
+    def fail(*args, **kwargs):
+        raise exc
+
+    return fail
+
+
+@pytest.mark.parametrize(
+    ("code", "name"),
+    [
+        (sqlite3.SQLITE_BUSY, "SQLITE_BUSY"),
+        (sqlite3.SQLITE_LOCKED, "SQLITE_LOCKED"),
+        (517, "SQLITE_BUSY_SNAPSHOT"),
+    ],
+)
+async def test_lock_contention_on_insert_is_503_with_retry_after(
+    client, app, monkeypatch, caplog, code, name
+):
+    monkeypatch.setattr(
+        app.state.repo, "insert_or_get", _fail_with(_sqlite_error(code, name))
+    )
+    before = await _count(client, "shop", "db_busy")
+    with caplog.at_level(logging.INFO):
+        r = await client.post("/webhooks", json=_webhook("A"), headers=SRC)
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "5"
+    assert r.json() == {"detail": "database busy, retry later"}
+    assert await _count(client, "shop", "db_busy") - before == 1
+    busy = [
+        r for r in caplog.records if getattr(r, "event", None) == "db_busy"
+    ]
+    (record,) = busy
+    assert record.levelno == logging.WARNING
+    assert record.idempotency_key == "A"
+
+
+async def test_other_database_errors_on_insert_are_not_masked(
+    client, app, monkeypatch
+):
+    exc = _sqlite_error(sqlite3.SQLITE_IOERR, "SQLITE_IOERR")
+    monkeypatch.setattr(app.state.repo, "insert_or_get", _fail_with(exc))
+    # ASGITransport re-raises unhandled app errors (a 500 in production).
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        await client.post("/webhooks", json=_webhook("A"), headers=SRC)
+    assert raised.value is exc
+
+
+async def test_lock_contention_marks_request_span_as_error(
+    client, app, monkeypatch, span_exporter
+):
+    exc = _sqlite_error(sqlite3.SQLITE_BUSY, "SQLITE_BUSY")
+    monkeypatch.setattr(app.state.repo, "insert_or_get", _fail_with(exc))
+    r = await client.post("/webhooks", json=_webhook("A"), headers=SRC)
+    assert r.status_code == 503
+    (span,) = _server_spans(span_exporter)
+    assert span.status.status_code is StatusCode.ERROR
+    assert "internal" not in json.dumps(dict(span.attributes))
+
+
+@pytest.mark.parametrize("overrides", [{"max_backlog": 1}])
+async def test_lock_contention_in_backpressure_lookup_is_503(
+    client, app, monkeypatch
+):
+    r = await client.post("/webhooks", json=_webhook("A"), headers=SRC)
+    assert r.status_code == 202
+    app.state.stats.refresh()
+    exc = _sqlite_error(sqlite3.SQLITE_BUSY, "SQLITE_BUSY")
+    monkeypatch.setattr(app.state.repo, "get", _fail_with(exc))
+    r = await client.post("/webhooks", json=_webhook("B"), headers=SRC)
+    assert r.status_code == 503
+    assert r.json() == {"detail": "database busy, retry later"}
+    assert r.headers["retry-after"] == "5"
+
+
+async def test_real_write_lock_contention_is_503(
+    client, app, monkeypatch, tmp_path
+):
+    insert = app.state.repo.insert_or_get
+
+    def impatient_insert(*args, **kwargs):
+        # Runs on the request's threadpool thread, i.e. on its connection.
+        app.state.pool.get().execute("PRAGMA busy_timeout=50")
+        return insert(*args, **kwargs)
+
+    monkeypatch.setattr(app.state.repo, "insert_or_get", impatient_insert)
+    holder = sqlite3.connect(tmp_path / "a.db", autocommit=True)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        r = await client.post("/webhooks", json=_webhook("A"), headers=SRC)
+        assert r.status_code == 503
+        holder.execute("ROLLBACK")
+    finally:
+        holder.close()
+    r = await client.post("/webhooks", json=_webhook("A"), headers=SRC)
+    assert r.status_code == 202
 
 
 async def test_post_stores_traceparent_of_request_span(

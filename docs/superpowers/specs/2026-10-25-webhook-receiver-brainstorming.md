@@ -549,3 +549,15 @@ Wzorzec `health,ready,metrics` był dopasowywany jako fragment do
 `schemat://Host/ścieżka` — klient mógł nagłówkiem `Host` wyłączyć span
 `POST` (pusty `traceparent`). **Rozstrzygnięcie: wzorce zakotwiczone na
 całym adresie**; spec §12 zaktualizowany.
+
+## 34. SQLITE_BUSY w POST (benchmarki Task 15)
+
+Benchmark rywalizacji pokazał, że przy wysyceniu zapisu blokada SQLite nie
+jest sprawiedliwa: część procesów nie zatwierdza nic przez 10 s, a
+`BEGIN IMMEDIATE` kończy się `SQLITE_BUSY` po pełnym `busy_timeout` (5 s).
+W teście obciążeniowym zapisy to ok. 4% pułapu, więc problem dotyczy tylko
+nasycenia; worker już go przeżywa (log, odzyskanie rezerwacji), a `POST`
+odpowiadał `500`. **Decyzja (zaakceptowana przez użytkownika): `503` +
+`Retry-After` dla `SQLITE_BUSY`/`SQLITE_LOCKED` w przyjmowaniu zdarzenia;
+pozostałe błędy bazy nadal `500`; `busy_timeout` bez zmian** — podniesienie
+tylko wydłużyłoby ogon opóźnień. Spec §6 i §12 zaktualizowane.
