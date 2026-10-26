@@ -196,8 +196,10 @@ Odpowiedzi:
 | przekroczony limit nadawcy | `429` + `Retry-After` [ustalone] | opis |
 | przekroczony próg zaległości (backpressure) | `503` + `Retry-After` [decyzja projektanta] | opis |
 
-**Kolejność kontroli w `POST`** [decyzja projektanta, po recenzji]:
-`X-Source` (`400`) → rozmiar (`413`) → walidacja body (`422`) → rate
+**Kolejność kontroli w `POST`** [ustalone — po recenzji Task 9]:
+rozmiar (`413`, middleware obejmujące całą aplikację — za duże body
+odrzucane przed jakąkolwiek inną pracą) → `X-Source` (`400`) → walidacja
+body (`422`) → rate
 limit (`429`; duplikaty też się liczą) → backpressure → zapis. Przy
 przekroczonym progu zaległości serwis najpierw sprawdza, czy klucz już
 istnieje: **duplikat dostaje `200` z aktualnym statusem, a nie `503`**

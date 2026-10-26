@@ -535,3 +535,10 @@ Implementer użył `check_same_thread=False` dla wszystkich połączeń, żeby
 `ConnectionPool.close_all()` mógł zamknąć połączenia innych wątków; spec
 zabraniał. **Rozstrzygnięcie koordynatora:** flaga tylko w puli, `connect()`
 domyślnie z ochroną; spec §7 zaktualizowany.
+
+## 32. Kolejność kontroli w POST (recenzja Task 9)
+
+Middleware limitu body obejmuje całą aplikację, więc `413` wyprzedza `400`
+za brak `X-Source`. **Decyzja (rozstrzygnięcie koordynatora zaakceptowane
+przez użytkownika): kolejność `413` → `400` → `422` → `429` → backpressure.**
+Spec §6 zaktualizowany.
