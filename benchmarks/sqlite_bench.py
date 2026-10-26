@@ -79,6 +79,7 @@ class Sizes:
     sync_inserts: int
     claim_sizes: tuple[int, ...]
     claims_per_repeat: int
+    claim_warmup: int
     writer_counts: tuple[int, ...]
     contention_seconds: float
     retention_eligible: int
@@ -89,6 +90,7 @@ FULL = Sizes(
     sync_inserts=1000,
     claim_sizes=(0, 10_000, 100_000),
     claims_per_repeat=50,
+    claim_warmup=100,
     writer_counts=(1, 2, 4, 8),
     contention_seconds=10.0,
     retention_eligible=10_000,
@@ -98,6 +100,7 @@ QUICK = Sizes(
     sync_inserts=100,
     claim_sizes=(0, 1_000),
     claims_per_repeat=5,
+    claim_warmup=5,
     writer_counts=(1, 2),
     contention_seconds=0.5,
     retention_eligible=2_000,
@@ -238,7 +241,7 @@ def _sync_samples(
 ) -> list[float]:
     """Durations of ``count`` timed ``insert_or_get`` calls.
 
-    ``rate`` paces the calls on a fixed schedule (tx/s); ``None`` runs
+    ``rate`` paces the calls at most ``rate`` per second; ``None`` runs
     them back to back. ``SYNC_WARMUP`` untimed inserts come first.
     """
     pool = ConnectionPool(fresh_db(base, f"sync-{mode.lower()}"))
@@ -254,12 +257,15 @@ def _sync_samples(
                 f"warm-{i}", "bench", "order.created", PAYLOAD, None
             )
         samples = []
-        started = time.perf_counter()
+        next_at = time.perf_counter()
         for i in range(count):
             if rate is not None:
-                delay = started + i / rate - time.perf_counter()
+                delay = next_at - time.perf_counter()
                 if delay > 0:
                     time.sleep(delay)
+                # Never earlier than the last call's start + 1/rate: a
+                # slow call is not followed by a catch-up burst.
+                next_at = max(next_at, time.perf_counter()) + 1 / rate
             elapsed, _ = timed(
                 repo.insert_or_get,
                 f"k-{i}",
@@ -304,15 +310,63 @@ def bench_sync(
 # --- 2. claim / recover_expired with a growing queue ----------------------
 
 
+def _reset_claimed(conn: sqlite3.Connection, ids: list[int], run_at: int):
+    """Put claimed rows back to ``pending`` (setup, never timed)."""
+    with immediate(conn):
+        conn.executemany(
+            "UPDATE webhook_events SET status = 'pending',"
+            " attempts = 0, run_at = ? WHERE id = ?",
+            [(run_at, i) for i in ids],
+        )
+
+
+def _claim_cycle(
+    repo: EventRepository,
+    conn: sqlite3.Connection,
+    size: int,
+    ready_at: int,
+) -> tuple[float, float, float, float]:
+    """One timed ``recover_expired`` + ``claim``, and one split claim.
+
+    Returns ``(recover, claim, exec, commit)`` seconds. The split claim
+    runs ``CLAIM_SQL`` under ``immediate()`` like the repository does,
+    timing the statement (exec) apart from the COMMIT (fsync).
+    """
+    recover, _ = timed(repo.recover_expired, MAX_ATTEMPTS)
+    claim, got = timed(repo.claim, CLAIM_LIMIT, LEASE_MS)
+    if len(got) != min(CLAIM_LIMIT, size):
+        raise RuntimeError(f"claimed {len(got)} of {size}")
+    _reset_claimed(conn, [e.id for e in got], ready_at)
+    params = {
+        "now": SystemClock().now_ms(),
+        "lease": LEASE_MS,
+        "limit": CLAIM_LIMIT,
+    }
+    with immediate(conn):
+        start = time.perf_counter()
+        rows = conn.execute(CLAIM_SQL, params).fetchall()
+        executed = time.perf_counter()
+    committed = time.perf_counter()
+    _reset_claimed(conn, [r["id"] for r in rows], ready_at)
+    return recover, claim, executed - start, committed - executed
+
+
 def bench_claim(
     base: Path, repeat: int, sizes: Sizes
 ) -> tuple[list[Result], list[str]]:
     """``claim(20)`` and ``recover_expired`` at several queue sizes.
 
     Each size is populated once (``size`` due ``pending`` rows plus
-    ``LEASED_ROWS`` valid leases). After every timed ``claim`` the
-    claimed rows are put back to ``pending`` (untimed), so every claim
-    sees exactly ``size`` ready rows.
+    ``LEASED_ROWS`` valid leases). After every claim the claimed rows
+    are put back to ``pending`` (untimed), so every claim sees exactly
+    ``size`` ready rows. Before timing, ``claim_warmup`` untimed cycles
+    run: the 0-ready case never writes, so without them the first size
+    that commits pays for a cold storage/fsync path (measured: ~3x
+    slower COMMIT for whichever size runs first).
+
+    Besides the whole ``claim()``, the claim statement is timed alone
+    (``exec``, no COMMIT) to separate the query cost, which is what the
+    indexes govern, from the fsync of the commit.
 
     Caveat: the reset restores the same ``run_at``, so every claim
     re-takes the same 20 rows (same rowids) and the index pages they
@@ -327,7 +381,8 @@ def bench_claim(
         try:
             conn = pool.get()
             now = clock.now_ms()
-            bulk_insert(conn, "ready", size, "pending", now - 60_000)
+            ready_at = now - 60_000
+            bulk_insert(conn, "ready", size, "pending", ready_at)
             bulk_insert(
                 conn,
                 "leased",
@@ -338,34 +393,34 @@ def bench_claim(
             )
             conn.execute("ANALYZE")
             repo = EventRepository(pool, clock)
-            claims: list[float] = []
-            recovers: list[float] = []
+            log(f"claim {size}: warm-up {sizes.claim_warmup} cycles")
+            for _ in range(sizes.claim_warmup):
+                _claim_cycle(repo, conn, size, ready_at)
+            samples: list[tuple[float, float, float, float]] = []
             for rep in range(repeat):
                 log(f"claim {size}: run {rep + 1}/{repeat}")
                 for _ in range(sizes.claims_per_repeat):
-                    elapsed, _ = timed(repo.recover_expired, MAX_ATTEMPTS)
-                    recovers.append(elapsed)
-                    elapsed, got = timed(repo.claim, CLAIM_LIMIT, LEASE_MS)
-                    claims.append(elapsed)
-                    if len(got) != min(CLAIM_LIMIT, size):
-                        raise RuntimeError(f"claimed {len(got)} of {size}")
-                    with immediate(conn):
-                        conn.executemany(
-                            "UPDATE webhook_events SET status = 'pending',"
-                            " attempts = 0, run_at = ? WHERE id = ?",
-                            [(now - 60_000, e.id) for e in got],
-                        )
-            results.append(
-                ms_result("claim", f"claim(20) @ {size} ready", claims)
+                    samples.append(_claim_cycle(repo, conn, size, ready_at))
+            recovers, claims, execs, commits = (
+                list(c) for c in zip(*samples, strict=True)
             )
-            results.append(
+            commit_median = statistics.median(commits) * 1000
+            results += [
+                ms_result("claim", f"claim(20) @ {size} ready", claims),
+                ms_result(
+                    "claim",
+                    f"claim(20) exec @ {size} ready",
+                    execs,
+                    f"CLAIM_SQL without COMMIT; COMMIT median"
+                    f" {commit_median:.3f} ms",
+                ),
                 ms_result(
                     "recover",
                     f"recover_expired @ {size} ready",
                     recovers,
-                    f"{LEASED_ROWS} valid leases",
-                )
-            )
+                    f"{LEASED_ROWS} valid leases, none expired (no write)",
+                ),
+            ]
             if size == sizes.claim_sizes[-1]:
                 params = {
                     "now": now,
