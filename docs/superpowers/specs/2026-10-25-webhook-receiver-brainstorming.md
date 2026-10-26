@@ -557,8 +557,10 @@ zapisu blokada SQLite nie jest sprawiedliwa: przy 4 i 8 procesach piszących
 najwolniejszy proces ma 0 tx/s, najdłuższa transakcja trwa ~5,1 s (pełny
 `busy_timeout=5000`), a w 5 przebiegach wystąpiło 4, 10 i 27 błędów
 `SQLITE_BUSY` (2, 4 i 8 procesów). Test obciążeniowy (`results/steady.txt`:
-3000 żądań w 180 s, ~17 zdarzeń/s) to wg analizy Task 15 ok. 100 tx/s, czyli
-ok. 4% pułapu ~2200–2300 tx/s — problem dotyczy tylko nasycenia. Worker już
+3000 żądań w 180 s, ~17 zdarzeń/s) to ≤ 3 zapisy na zdarzenie (zapis
+zdarzenia, rezerwacja, zakończenie; rezerwacja obejmuje do 20 zdarzeń),
+czyli ≤ ~50 tx/s — ok. 2% pułapu ~2200–2300 tx/s. Problem dotyczy tylko
+nasycenia. Worker już
 go przeżywa (log, odzyskanie rezerwacji), a `POST` odpowiadał `500`.
 **Decyzja (zaakceptowana przez użytkownika): `503` + `Retry-After` dla
 `SQLITE_BUSY`/`SQLITE_LOCKED` w przyjmowaniu zdarzenia; pozostałe błędy bazy
