@@ -36,6 +36,12 @@ class RateLimiter:
         clock: Clock,
         max_sources: int,
     ) -> None:
+        if rate_per_second <= 0:
+            raise ValueError("rate_per_second must be > 0")
+        if burst < 1:
+            raise ValueError("burst must be >= 1")
+        if max_sources < 1:
+            raise ValueError("max_sources must be >= 1")
         self._rate = rate_per_second
         self._burst = burst
         self._clock = clock
@@ -44,8 +50,8 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def check(self, source: str) -> RateDecision:
-        now = self._clock.now_ms()
         with self._lock:
+            now = self._clock.now_ms()
             bucket = self._buckets.get(source)
             if bucket is None:
                 bucket = _Bucket(tokens=float(self._burst), updated_ms=now)
@@ -59,7 +65,9 @@ class RateLimiter:
                     float(self._burst),
                     bucket.tokens + elapsed_ms * self._rate / 1000,
                 )
-                bucket.updated_ms = now
+                # Never move backwards: a wall-clock step back must not
+                # let the same interval be credited twice.
+                bucket.updated_ms = max(bucket.updated_ms, now)
             if bucket.tokens >= 1:
                 bucket.tokens -= 1
                 return RateDecision(allowed=True, retry_after_seconds=0)

@@ -1,5 +1,7 @@
 import threading
 
+import pytest
+
 from webhook_receiver.api.ratelimit import RateDecision, RateLimiter
 
 
@@ -107,3 +109,37 @@ def test_concurrent_checks_never_exceed_burst(clock):
         t.join(timeout=10)
         assert not t.is_alive()
     assert sum(allowed) == 100
+
+
+class _SteppingClock:
+    """Clock that can be set to any time, including backwards."""
+
+    def __init__(self, now_ms: int) -> None:
+        self.now = now_ms
+
+    def now_ms(self) -> int:
+        return self.now
+
+
+def test_clock_step_back_does_not_credit_tokens_twice():
+    t0 = 1_700_000_000_000
+    c = _SteppingClock(t0)
+    rl = RateLimiter(1, 1, c, 10)
+    assert rl.check("a").allowed  # bucket empty at t0
+    c.now = t0 + 500
+    assert not rl.check("a").allowed  # 0.5 tokens
+    c.now = t0  # wall clock steps back
+    assert not rl.check("a").allowed
+    c.now = t0 + 500  # back to the original time: nothing new elapsed
+    assert not rl.check("a").allowed
+    c.now = t0 + 1000  # monotonic sequence would allow here
+    assert rl.check("a").allowed
+
+
+@pytest.mark.parametrize(
+    ("rate", "burst", "max_sources"),
+    [(0, 1, 1), (-1, 1, 1), (1, 0, 1), (1, 1, 0)],
+)
+def test_rejects_invalid_arguments(clock, rate, burst, max_sources):
+    with pytest.raises(ValueError):
+        RateLimiter(rate, burst, clock, max_sources)
