@@ -240,7 +240,7 @@ Ponowienia (`payload.simulate`: `fail_once`, `fail_always`) i rate limiting →
 
 - nagłówek `X-Source` (1–64 znaki),
 - body `{"idempotency_key", "event_type", "payload"}`,
-- `idempotency_key`: niepusty string do 255 znaków, globalnie unikalny.
+- `idempotency_key`: niepusty napis do 255 znaków, globalnie unikalny.
 
 **`GET /webhooks/{idempotency_key}`** zwraca status zdarzenia.
 
@@ -356,8 +356,10 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 > **Kiedy mierzono.** Test obciążeniowy (`steady`, `burst`, `scaling`)
 > wykonano **przed dodaniem OpenTelemetry Collectora**. Ślady szły wtedy
 > prosto do Jaegera, a metryki były tylko wystawiane na `/metrics` (bez
-> wypychania przez OTLP). Z Collectorem powtórzono jedynie krótki `steady`
-> (PASS).
+> wypychania przez OTLP) — oraz **przed poprawkami z końcowej recenzji**
+> (pula połączeń, indeks czyszczenia payloadu, wyłączony log dostępu).
+> Z Collectorem powtórzono jedynie krótki `steady` (`--minutes 0.1`:
+> 100/100 `completed`, p99 16,8 ms, PASS).
 >
 > Benchmarków SQLite to nie dotyczy: nie używają sieci ani telemetrii.
 > Uruchomiono je ponownie po poprawkach z końcowej recenzji.
@@ -462,7 +464,7 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
 
 - **Format `idempotency_key`:** doprecyzować z nadawcami (zestaw znaków,
   długość, struktura) i wybrać rozwiązanie:
-  - obecne (dowolny string + kodowanie procentowe),
+  - obecne (dowolny napis + kodowanie procentowe),
   - ograniczony zestaw znaków,
   - klucz poza ścieżką (parametr zapytania / wewnętrzny identyfikator).
 
@@ -523,8 +525,9 @@ Projekt zaprojektowano i zbudowano w Claude Code, według procesu ze
 zbioru umiejętności [superpowers](https://github.com/obra/superpowers).
 Modele Claude:
 
-- **Opus** — koordynacja pracy, a od zadania 5 implementacja i wszystkie
-  recenzje (zadania 0–4 implementowały Haiku i Sonnet);
+- **Opus** — koordynacja pracy, recenzje od zadania 4, implementacja od
+  zadania 5 (zadanie 0 implementował Haiku, a recenzował Sonnet; zadania
+  1–4 implementował Sonnet);
 - **Fable** — recenzja dokumentu projektowego i końcowa recenzja całego
   repozytorium.
 
@@ -535,7 +538,8 @@ Przebieg:
 3. Plan implementacji podzielony na zadania.
 4. Każde zadanie implementuje jeden subagent, a recenzuje drugi.
    Poprawki trwają, aż recenzja nie ma uwag.
-5. Jeden PR na zadanie; autor go przegląda i scala.
+5. Jeden PR na zadanie; autor go przegląda i scala (od zadania 1 — PR
+   zadania 0 scalił koordynator).
 6. Na końcu recenzja całego repozytorium.
 
 Dokumenty:

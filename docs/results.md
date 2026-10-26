@@ -35,7 +35,10 @@ wykonano **przed dodaniem OpenTelemetry Collectora**.
 
 - Ślady szły wtedy prosto do Jaegera, a metryki były tylko wystawiane na
   `/metrics` (bez wypychania przez OTLP).
-- Z Collectorem powtórzono jedynie krótki `steady` (PASS).
+- Pomiar odbył się także **przed poprawkami z końcowej recenzji** (pula
+  połączeń, indeks czyszczenia payloadu, wyłączony log dostępu).
+- Z Collectorem powtórzono jedynie krótki `steady` (`--minutes 0.1`:
+  100/100 `completed`, p99 16,8 ms, PASS).
 - Benchmarków SQLite to nie dotyczy: nie używają sieci ani telemetrii.
   Uruchomiono je ponownie po poprawkach z końcowej recenzji.
 

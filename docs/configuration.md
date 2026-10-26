@@ -58,22 +58,20 @@ Konfiguracja jest walidowana przy starcie:
 | Zmienna | W compose | Znaczenie |
 |---|---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` | adres OTLP/HTTP |
-| `OTEL_TRACES_EXPORTER` | — | jawny wybór eksportera śladów |
-| `OTEL_METRICS_EXPORTER` | `otlp` | wypychanie metryk przez OTLP |
-| `OTEL_METRIC_EXPORT_INTERVAL` | `5000` | co ile ms wypychać metryki |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `3` | limit jednej wysyłki OTLP, **w sekundach** |
+| `OTEL_TRACES_EXPORTER` | — | eksporter śladów: `otlp`, `console` albo `none` |
+| `OTEL_METRICS_EXPORTER` | `otlp` | `otlp` włącza wypychanie metryk przez OTLP |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `5000` | co ile ms wypychać metryki (domyślnie w SDK 60000) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `3` | limit jednej wysyłki OTLP łącznie z ponowieniami |
 
 Uwagi do tabeli:
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: samo ustawienie przełącza eksport śladów
+- Samo ustawienie `OTEL_EXPORTER_OTLP_ENDPOINT` przełącza eksport śladów
   na OTLP.
-- `OTEL_TRACES_EXPORTER`: `otlp`, `console` albo `none`.
-- `OTEL_METRICS_EXPORTER`: `otlp` (także na liście, np. `prometheus,otlp`)
-  dodaje wypychanie metryk przez OTLP. Domyślnie tylko lokalne `/metrics`.
-- `OTEL_METRIC_EXPORT_INTERVAL`: domyślnie w SDK 60000.
-- `OTEL_EXPORTER_OTLP_TIMEOUT`: limit obejmuje ponowienia. Jednostką są
-  sekundy (SDK Pythona); specyfikacja OTel podaje ms. Ogranicza końcowe
-  wypchnięcie przy zamykaniu.
+- `OTEL_METRICS_EXPORTER` może być listą (np. `prometheus,otlp`). Bez
+  `otlp` metryki są tylko na lokalnym `/metrics`.
+- `OTEL_EXPORTER_OTLP_TIMEOUT` jest **w sekundach** (SDK Pythona;
+  specyfikacja OTel podaje ms). Ogranicza też końcowe wypchnięcie przy
+  zamykaniu.
 
 Działanie domyślne:
 

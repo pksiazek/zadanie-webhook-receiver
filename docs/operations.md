@@ -132,9 +132,9 @@ Kody odpowiedzi i kolejność kontroli: [README](../README.md#api).
 {"idempotency_key": "evt-001", "event_type": "order.created", "payload": {"...": "..."}}
 ```
 
-- `idempotency_key` — niepusty string, maks. 255 znaków, dowolne znaki;
+- `idempotency_key` — niepusty napis, maks. 255 znaków, dowolne znaki;
   **globalnie unikalny** (nie w obrębie nadawcy).
-- `event_type` — niepusty string.
+- `event_type` — niepusty napis.
 - `payload` — obiekt JSON.
 - Inne pola są ignorowane.
 - Limit body: 256 KiB (`MAX_BODY_BYTES`), sprawdzany na `Content-Length`
@@ -205,48 +205,37 @@ Przykład (`curl -s localhost:8000/webhooks/evt-001` po zakończeniu):
 | Endpoint | Proces | Znaczenie |
 |---|---|---|
 | `GET /health` | api | liveness: proces odpowiada |
-| `GET /ready` | api | readiness (niżej) |
+| `GET /ready` | api | readiness: baza odpowiada i schemat istnieje |
 | `GET /metrics` | api | Prometheus, w tym gauge'e kolejki |
-| `GET /health` (port 9100) | worker | pętla workera działa (niżej) |
+| `GET /health` (port 9100) | worker | pętla workera wykonała iterację w ciągu 10 × `POLL_INTERVAL_SECONDS` |
 | `GET /metrics` (port 9100) | worker | metryki przetwarzania tego workera |
 
 Uwagi do tabeli:
 
-- **`/ready` API:** baza odpowiada na zapytanie i schemat istnieje;
-  inaczej `503` z listą `failed`. **Nie zależy od workerów**
-  ([dlaczego](tradeoffs.md#readiness-api-niezależne-od-workera)).
-- **`/health` workera:** pętla workera działa i wykonała iterację w ciągu
-  ostatnich 10 × `POLL_INTERVAL_SECONDS`. Używany przez healthcheck
-  Dockera.
+- `/ready` w razie problemu zwraca `503` z listą `failed`. **Nie zależy od
+  workerów** ([dlaczego](tradeoffs.md#readiness-api-niezależne-od-workera)).
+- `/health` workera odpytuje healthcheck Dockera.
 
 ## Przejścia statusów
 
-| Przejście | Kiedy |
+| Przejście | Kiedy dokładnie |
 |---|---|
-| → `pending` | zapis nowego zdarzenia (1) |
-| `pending`/`retrying` → `processing` | rezerwacja przez worker (2) |
-| `processing` → `completed` | sukces (3) |
-| `processing` → `retrying` | błąd i `attempts < MAX_ATTEMPTS` (4) |
-| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; stan końcowy |
-| `processing` → `retrying` / `failed` | odzyskanie rezerwacji (5) |
+| → `pending` | zapis nowego zdarzenia, w tej samej transakcji, przed `202`; ustawia `run_at = now`, `attempts = 0` |
+| `pending`/`retrying` → `processing` | worker atomowo rezerwuje porcję (zapytanie niżej); ustawia `run_at = now + LEASE_SECONDS`, `attempts += 1` |
+| `processing` → `completed` | sukces; wynik, status i `finished_at` zapisuje jedna instrukcja z kontrolą numeru próby |
+| `processing` → `retrying` | błąd przy `attempts < MAX_ATTEMPTS`; ustawia `run_at = now + odstęp` i zapisuje `last_error` |
+| `processing` → `failed` | błąd przy `attempts = MAX_ATTEMPTS`; to stan końcowy |
+| `processing` → `retrying` / `failed` | rezerwacja wygasła (`run_at <= now`), bo worker padł; ustawia `last_error = "lease expired"` |
 
-Dokładne warunki:
+Rezerwacja to jedno zapytanie:
 
-1. W transakcji zapisu nowego zdarzenia, przed `202`; `run_at = now`,
-   `attempts = 0`.
-2. Worker atomowo rezerwuje porcję jednym zapytaniem:
-   ```sql
-   UPDATE … WHERE id IN (SELECT id … WHERE status IN ('pending','retrying')
-     AND run_at <= now ORDER BY run_at LIMIT k) RETURNING *
-   ```
-   Ustawia `run_at = now + LEASE_SECONDS`, `attempts += 1`.
-3. Zapis wyniku, statusu i `finished_at` jedną instrukcją z kontrolą
-   numeru próby.
-4. `run_at = now + odstęp`, `last_error` zapisany.
-5. `run_at <= now` przy `processing` — worker padł.
-   - `last_error = "lease expired"`.
-   - Wykonywane przez każdy worker przed rezerwacją
-     (`webhook_lease_recoveries_total`).
+```sql
+UPDATE … WHERE id IN (SELECT id … WHERE status IN ('pending','retrying')
+  AND run_at <= now ORDER BY run_at LIMIT k) RETURNING *
+```
+
+Odzyskanie rezerwacji wykonuje każdy worker przed rezerwacją
+(`webhook_lease_recoveries_total`).
 
 **`run_at` łączy dwa terminy** (wzorzec „visibility timeout”, jak w SQS):
 
@@ -263,18 +252,16 @@ Dokładne warunki:
 
 | Metryka | Znaczenie |
 |---|---|
-| `webhooks_received_total{source, outcome}` | przyjęte żądania według wyniku (niżej) |
+| `webhooks_received_total{source, outcome}` | `outcome` = `accepted`, `duplicate`, `rate_limited`, `backpressure`, `db_busy`, `invalid` |
 | `webhook_queue_depth{status}` | liczba zdarzeń `pending`, `retrying`, `processing` |
-| `webhook_queue_oldest_pending_age_seconds` | wiek najstarszej pracy **należnej i niepodjętej** (niżej) |
+| `webhook_queue_oldest_pending_age_seconds` | wiek najstarszej pracy **należnej i niepodjętej** |
 
 Uwagi do tabeli:
 
-- **`webhooks_received_total`:** `outcome` = `accepted`, `duplicate`,
-  `rate_limited`, `backpressure`, `db_busy`, `invalid`. `413` nie jest
-  liczone.
-- **`webhook_queue_depth`:** stanów końcowych nie liczymy — wymagałoby to
+- `413` nie jest liczone w `webhooks_received_total`.
+- Stanów końcowych w `webhook_queue_depth` nie liczymy — wymagałoby to
   skanu tabeli.
-- **`webhook_queue_oldest_pending_age_seconds`:**
+- `webhook_queue_oldest_pending_age_seconds`:
   - obejmuje `pending`/`retrying` z `run_at <= now` oraz `processing` z
     wygasłą rezerwacją,
   - liczony od `run_at`, więc odstęp ponowienia nie daje fałszywych
@@ -283,7 +270,7 @@ Uwagi do tabeli:
     **najważniejszy sygnał „nikt nie przetwarza”**.
 
 Gauge'e czytają cache odświeżany co ~1 s (ten sam, którego używa
-backpressure), więc scrape nie wykonuje zapytań do bazy.
+backpressure), więc odczyt metryk nie wykonuje zapytań do bazy.
 
 #### Worker
 
@@ -553,7 +540,7 @@ docker compose down -v && docker compose up -d --build --wait
 docker compose run --rm -T loadtest steady > docs/results/steady.txt  # ~3 min
 docker compose down -v && docker compose up -d --build --wait
 docker compose run --rm -T loadtest burst > docs/results/burst.txt    # ~6–7 min
-bash loadtest/scaling.sh                                    # N = 1, 2, 3; ~10 min
+bash loadtest/scaling.sh                                              # N = 1, 2, 3; ~10 min
 ```
 
 Wszystkie tempa, czasy i progi to flagi (`docker compose run --rm

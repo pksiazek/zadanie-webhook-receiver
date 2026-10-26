@@ -235,7 +235,7 @@ Wykrywanie niezgodności (hash treści + `409` albo metryka) →
 
 ## Klucze `.` i `..`
 
-Klucz może być dowolnym stringiem do 255 znaków. W ścieżce `GET` jest
+Klucz może być dowolnym napisem do 255 znaków. W ścieżce `GET` jest
 kodowany procentowo (np. `evt/1` → `evt%2F1`; trasa używa konwertera
 `{idempotency_key:path}`).
 
@@ -275,13 +275,13 @@ rotacją, a wpisy zbiera Docker (`docker compose logs`).
 **Koszt:** zapis jest synchroniczny i odbywa się w ścieżce żądania API
 oraz próby workera.
 
-- Każdy wpis kosztuje czas i CPU.
+- Każdy wpis kosztuje czas i CPU — im więcej wpisów, tym większy narzut.
 - Sterownik `json-file` Dockera dokłada zapis na dysk.
-- Im więcej wpisów, tym większy narzut.
 
-**Pomiary:** test obciążeniowy działał w tej konfiguracji (log dostępu
-uvicorna wyłączony, jeden wpis na wynik żądania) i spełnił kryteria.
-Kosztu samych logów nie mierzyliśmy osobno.
+**Pomiary:** test obciążeniowy działał z logami na stdout — wtedy jeszcze
+z włączonym logiem dostępu uvicorna (wyłączonym później), czyli z większą
+liczbą wpisów niż obecnie — i spełnił kryteria. Kosztu samych logów nie
+mierzyliśmy osobno.
 
 Zapis poza ścieżką żądania (`QueueHandler`/`QueueListener`, plik z
 rotacją albo logi OTLP przez Collector, próbkowanie częstych wpisów) i
