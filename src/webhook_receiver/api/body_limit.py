@@ -37,8 +37,7 @@ class BodySizeLimitMiddleware:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        declared = _content_length(scope)
-        if declared is not None and declared > self._max:
+        if _declared_too_large(scope, self._max):
             await _send_413(send)
             return
 
@@ -74,13 +73,13 @@ class BodySizeLimitMiddleware:
         await self._app(scope, replay, send)
 
 
-def _content_length(scope: Scope) -> int | None:
-    """Declared ``Content-Length``, or ``None`` if absent or unusable.
+def _declared_too_large(scope: Scope, max_bytes: int) -> bool:
+    """Whether a usable ``Content-Length`` exceeds ``max_bytes``.
 
     Only ASCII digits are accepted (no sign, whitespace or underscores,
     which ``int()`` would tolerate). Several headers are used only if
-    they all agree. Anything else is ignored and the streaming count
-    enforces the limit.
+    they all agree. Anything else is ignored (``False``) and the
+    streaming count enforces the limit.
     """
     values = {
         value
@@ -88,12 +87,17 @@ def _content_length(scope: Scope) -> int | None:
         if name.lower() == b"content-length"
     }
     if len(values) != 1:
-        return None
+        return False
     (value,) = values
     # bytes.isdigit() is ASCII-only, unlike str.isdigit().
     if not value.isdigit():
-        return None
-    return int(value)
+        return False
+    digits = value.lstrip(b"0") or b"0"
+    # Compare lengths first: int() refuses strings longer than CPython's
+    # int/str digit limit (4300), and a header that long is too large.
+    if len(digits) > len(str(max_bytes)):
+        return True
+    return int(digits) > max_bytes
 
 
 async def _send_413(send: Send) -> None:

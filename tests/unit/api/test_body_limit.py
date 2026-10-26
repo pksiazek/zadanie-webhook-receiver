@@ -249,3 +249,20 @@ def test_equal_duplicate_content_lengths_are_used(seen):
     # No chunks queued: reading the body would raise.
     assert _raw_call(app, headers, []) == 413
     assert seen == []
+
+
+def test_huge_content_length_is_rejected_without_reading(seen):
+    # More digits than CPython's int/str conversion limit (4300).
+    app = _make_app(seen)
+    headers = [(b"content-length", b"1" * 5000)]
+    assert _raw_call(app, headers, []) == 413
+    assert seen == []
+
+
+def test_leading_zeros_in_content_length_are_ignored(seen):
+    app = _make_app(seen)
+    headers = [(b"content-length", b"0" * 5000 + b"5")]
+    assert _raw_call(app, headers, [b"12345"]) == 200
+    headers = [(b"content-length", b"0" * 5000 + b"11")]
+    assert _raw_call(app, headers, []) == 413
+    assert seen == [b"12345"]
