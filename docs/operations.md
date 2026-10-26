@@ -2,7 +2,7 @@
 
 [← README](../README.md)
 
-Dla operatora i oceniającego: demonstracje zachowania (awaria workera, restart API, ponowienia, rate limiting), szczegóły API, obserwowalność, zapytania SQLite oraz uruchamianie testów, testu obciążeniowego i benchmarków. Wszystkie polecenia zakładają stos z [README](../README.md#uruchomienie) (`docker compose up -d --build --wait`) i `H='Content-Type: application/json'`.
+Dla operatora i oceniającego: demonstracje zachowania (awaria workera, restart API, ponowienia, rate limiting), szczegóły API, obserwowalność, zapytania SQLite oraz uruchamianie testów, testu obciążeniowego i benchmarków. Wszystkie polecenia zakładają stos z [README](../README.md#uruchomienie) (`docker compose up -d --build --wait`).
 
 ## Spis treści
 
@@ -42,14 +42,12 @@ curl -s localhost:8000/webhooks/evt-crash   # nadal "completed"
 
 ### Ponowienia i rate limiting
 
-```bash
-H='Content-Type: application/json'
-```
-
 **Ponowienia** — deterministyczne wyzwalacze błędów w `payload.simulate`
 (dodatek do przykładów z zadania):
 
 ```bash
+H='Content-Type: application/json'
+
 # fail_once: próba 1 pada, próba 2 kończy się sukcesem
 curl -s -X POST localhost:8000/webhooks -H "$H" -H 'X-Source: shop' \
   -d '{"idempotency_key": "evt-fail-once", "event_type": "demo",
@@ -78,6 +76,7 @@ BACKOFF_MAX_SECONDS)` z losowym rozrzutem ±20%.
 żądań na start, potem 50/s):
 
 ```bash
+H='Content-Type: application/json'
 seq 1 150 | xargs -P 20 -I@ curl -s -o /dev/null -w '%{http_code}\n' \
   -X POST localhost:8000/webhooks -H "$H" -H 'X-Source: flood' \
   -d '{"idempotency_key": "rl-@", "event_type": "demo", "payload": {}}' \
@@ -96,6 +95,8 @@ konfiguracji).
 ## API — szczegóły
 
 ### `POST /webhooks`
+
+Kody odpowiedzi i kolejność kontroli: [README](../README.md#api).
 
 Nagłówki: `Content-Type: application/json`, **`X-Source`** (wymagany,
 1–64 znaki). Body:

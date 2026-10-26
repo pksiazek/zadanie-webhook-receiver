@@ -40,7 +40,7 @@ Całość 381,0 s (limit 900 s). Kolejka rosła do **3904** (t = 121 s), a
 potem spokojnie schodziła — netto ok. 150–175 zdarzeń na ~10 s mimo
 napływu 100/min — przy stałych 60 zdarzeniach w `processing`; przez cały czas opóźnienie `POST` się nie
 zmieniło (p99 wszystkich żądań 17,1 ms). Kompletność: 6416 / 6416
-`completed`. **PASS**. To jest główny argument za architekturą B:
+`completed`. **PASS**. To jest główny argument za osobnymi procesami `api` i `worker`:
 przyjmowanie nie zależy od tempa przetwarzania.
 
 Opóźnienie planowania generatora (o ile później od planu wysłał żądanie)
@@ -84,7 +84,7 @@ maksimum.
 Realistyczny koszt to wiersz z tempem 100 tx/s: **ok. 2 ms na zapis** z
 fsync (bez przerw zapisy korzystają z „rozgrzanego” urządzenia, stąd
 0,4 ms). `NORMAL` jest o rząd wielkości tańszy, a mimo to zostaje `FULL`
-— uzasadnienie w [tradeoffach](tradeoffs.md#synchronousfull-zamiast-normal). Zastrzeżenie: w maszynie
+— uzasadnienie w [kompromisach](tradeoffs.md#synchronousfull-zamiast-normal). Zastrzeżenie: w maszynie
 wirtualnej OrbStack na macOS fsync może nie wymuszać zapisu na nośnik tak
 jak `F_FULLFSYNC`, więc liczby dla `FULL` mogą być optymistyczne.
 

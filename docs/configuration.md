@@ -6,9 +6,9 @@ Zmienne środowiskowe, porty i tryby uruchomienia. Skrócona instrukcja uruchomi
 
 ## Zmienne środowiskowe
 
-Zmienne środowiskowe (nazwa = pole `Settings` w
+Nazwa zmiennej = pole `Settings` w
 [`common/config.py`](../src/webhook_receiver/common/config.py) wielkimi
-literami). Konfiguracja jest walidowana przy starcie
+literami. Konfiguracja jest walidowana przy starcie
 (`LEASE_SECONDS > SIMULATED_MAX_SECONDS`, `SIMULATED_MIN_SECONDS ≤
 SIMULATED_MAX_SECONDS`, `BACKOFF_MAX_SECONDS ≥ BACKOFF_BASE_SECONDS`).
 
@@ -39,7 +39,7 @@ SIMULATED_MAX_SECONDS`, `BACKOFF_MAX_SECONDS ≥ BACKOFF_BASE_SECONDS`).
 
 ## OpenTelemetry
 
-OpenTelemetry: `OTEL_EXPORTER_OTLP_ENDPOINT` przełącza eksport śladów na
+`OTEL_EXPORTER_OTLP_ENDPOINT` przełącza eksport śladów na
 OTLP/HTTP (w compose `http://jaeger:4318`); `OTEL_TRACES_EXPORTER`
 (`otlp`, `console`, `none`) wybiera eksporter jawnie. `OTEL_SERVICE_NAME`
 **nie jest uwzględniany** — nazwy usług (`webhook-api`, `webhook-worker`)

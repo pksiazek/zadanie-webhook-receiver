@@ -41,9 +41,10 @@ Prometheus, logi JSON). Szczegóły: [konfiguracja](docs/configuration.md),
 | Poprawne działanie przy wielu równoczesnych webhookach | [założenia skalowalności](#założenia-skalowalności), [wyniki](#wyniki) |
 | Zdefiniowana retencja | [retencja](docs/tradeoffs.md#retencja-dwa-progi-gdpr-plik-nie-maleje) |
 | README: architektura, tradeoffs, instrukcje uruchomienia | [architektura](#architektura), [kompromisy](#kompromisy-tradeoffy), [uruchomienie](#uruchomienie) |
+| Działający kod w Pythonie, który można uruchomić i przetestować | [uruchomienie](#uruchomienie), [testy](#testy) |
 | Dockerfile | [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml), [uruchomienie](#uruchomienie) |
 | Sekcja `# TODO` | [TODO](#todo) |
-| Bonus: testy jednostkowe | [testy](docs/operations.md#testy-test-obciążeniowy-benchmarki) (332 testy, próg pokrycia 85% w CI) |
+| Bonus: testy jednostkowe | [testy](docs/operations.md#testy-test-obciążeniowy-benchmarki) (próg pokrycia 85% w CI) |
 | Bonus: rate limiting | [API](#api), [szczegóły](docs/operations.md#post-webhooks) |
 | Bonus: metryki, health/readiness | [obserwowalność](docs/operations.md#obserwowalność), [endpointy](docs/operations.md#endpointy-operacyjne) |
 | Bonus: retry dla failed webhooków | [statusy](#statusy-zdarzenia), [demo ponowień](docs/operations.md#ponowienia-i-rate-limiting) |
@@ -93,10 +94,13 @@ flowchart LR
 - **api** zapisuje zdarzenie i odpowiada `202`, nie przetwarza — rosnąca
   kolejka nie wydłuża `POST`. **worker** (3 × 20 slotów asyncio) atomowo
   rezerwuje należne zdarzenia, symuluje przetwarzanie (2–5 s), zapisuje
-  wynik albo planuje ponowienie z wykładniczym odstępem.
+  wynik albo planuje ponowienie z wykładniczym odstępem. Pracę dobiera od
+  razu po zwolnieniu slotu; gdy nie było nic do pobrania, sprawdza kolejkę
+  co `POLL_INTERVAL_SECONDS` (0,5 s).
 - **Ślad** przechodzi przez granicę procesów: API zapisuje W3C `traceparent`
   w wierszu, worker tworzy z niego span `webhook.process` na każdą próbę.
-- Odrzucone: jeden proces z pulą asyncio (API i przetwarzanie dzielą los) i
+- Odrzucone: jeden proces z pulą asyncio (API i przetwarzanie dzielą los, brak
+  niezależnego skalowania) i
   broker Redis/Celery (zadanie narzuca SQLite, podwójny zapis wymaga
   outboxa) — [dokument projektowy §5](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md#5-wybrane-podejście).
 
@@ -119,8 +123,18 @@ ubocznego. Serwis gwarantuje:
 - **przed `COMMIT`** — nic nie zostało zapisane, ponowienie zapisuje
   zdarzenie jako nowe (`202`).
 
-Restart workera, idempotentny efekt uboczny i granica ochrony przed
-duplikatami → [docs/tradeoffs.md](docs/tradeoffs.md#gwarancje-założenia-i-restart-workera);
+**Założenie:** prawdziwy efekt uboczny (zamiast symulacji) musiałby być
+idempotentny względem `idempotency_key` — wykonanie może się powtórzyć, gdy
+worker padnie po wykonaniu, a przed zapisem wyniku.
+
+**Restart lub awaria workera:** zdarzenia w `processing` czekają na
+wygaśnięcie rezerwacji (do 30 s), potem są odzyskiwane. Łagodne zamykanie
+(SIGTERM) przestaje pobierać pracę i czeka na trwające próby do
+`SHUTDOWN_GRACE_SECONDS` (10 s); `stop_grace_period: 20s` w compose
+pilnuje, żeby Docker nie zabił workera wcześniej.
+
+Szczegóły i granica ochrony przed duplikatami (retencja) →
+[docs/tradeoffs.md](docs/tradeoffs.md#gwarancje-założenia-i-restart-workera);
 demo awarii workera i restartu API → [docs/operations.md](docs/operations.md#awaria-workera-i-restart-api).
 
 ## Uruchomienie
@@ -148,6 +162,15 @@ EMBEDDED_WORKER=true uv run python -m webhook_receiver api
 
 **Devcontainer** z docker-in-docker (w nim powstały wszystkie wyniki),
 polecenia jak na „gołym” hoście → [docs/configuration.md](docs/configuration.md#devcontainer).
+
+### Testy
+
+```bash
+uv run ruff check . && uv run ruff format --check .   # jak w CI
+uv run pytest            # unit + integration, próg pokrycia 85%
+```
+
+Test obciążeniowy i benchmarki → [docs/operations.md](docs/operations.md#testy-test-obciążeniowy-benchmarki).
 
 ## Przykłady: webhooki z treści zadania
 
@@ -269,7 +292,7 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 | Scenariusz | Ruch | p99 `POST` | Wynik |
 |---|---|---|---|
 | `steady` (3 workery) | 1000/min przez 3 min, 3000 żądań | 19,3 ms (max 50,1 ms) | 3000 × `202`, kolejka maks. 9, 3000/3000 `completed`; **PASS** |
-| `burst` (3 workery) | 3000/min przez 2 min, potem 100/min, potem 0 | 17,0 ms w fazie 3000/min | kolejka do 3904, zeszła do 0 w 381 s (limit 900 s), 6416/6416 `completed`; **PASS** |
+| `burst` (3 workery) | 3000/min przez 2 min, potem 100/min, potem 0 | 17,0 ms w fazie 3000/min | kolejka do 3904, do zera w t = 381 s (limit 900 s), 6416/6416 `completed`; **PASS** |
 | `scaling` N = 1 / 2 / 3 | zalana kolejka, pomiar przez 120 s | 17,2 / 18,4 / 21,0 ms | 342,3 / 683,0 / 1025,8 zdarzeń/min, liniowość 100 / 99,8 / 99,9%; **PASS** |
 
 Benchmarki SQLite ([`results/benchmarks.txt`](results/benchmarks.txt)):
