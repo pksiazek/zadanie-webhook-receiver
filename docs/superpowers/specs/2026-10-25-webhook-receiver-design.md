@@ -304,9 +304,12 @@ CREATE INDEX ix_events_ready ON webhook_events (run_at, status)
 -- odzyskiwanie wygasłych rezerwacji, licznik processing
 CREATE INDEX ix_events_leased ON webhook_events (run_at)
     WHERE status = 'processing';
--- retencja
+-- retencja: usuwanie wierszy
 CREATE INDEX ix_events_finished ON webhook_events (status, finished_at)
     WHERE finished_at IS NOT NULL;
+-- retencja: czyszczenie payloadu (tylko wiersze, które go jeszcze mają)
+CREATE INDEX ix_events_purgeable ON webhook_events (finished_at)
+    WHERE status = 'completed' AND payload_json IS NOT NULL;
 ```
 
 Uzasadnienia (do README):
@@ -334,13 +337,18 @@ Uzasadnienia (do README):
   w SQS): dla `pending`/`retrying` to moment, od którego wolno podjąć; dla
   `processing` — moment wygaśnięcia rezerwacji. Jedna kolumna zamiast
   dwóch.
-- **Dwa indeksy częściowe, dokładnie pod zapytania.** SQLite używa indeksu
+- **Indeksy częściowe, dokładnie pod zapytania.** SQLite używa indeksu
   częściowego tylko wtedy, gdy warunek zapytania zawiera **dosłownie**
   warunek indeksu („SQLite does not do algebra”). Dlatego
   `ix_events_ready` ma warunek `status IN ('pending','retrying')`
   identyczny z rezerwacją zdarzeń i gauge'ami, a `ix_events_leased` — `status =
   'processing'` identyczny z odzyskiwaniem. Kolumna `status` w
   `ix_events_ready` czyni indeks pokrywającym dla licznika per status.
+  `ix_events_purgeable` ma warunek identyczny z czyszczeniem payloadu i nie
+  zawiera wierszy już wyczyszczonych, więc porcja nie przechodzi przez nie
+  pod blokadą zapisu; zapytanie wskazuje go przez `INDEXED BY` (bez
+  `ANALYZE` planer wybrałby `ix_events_finished`). Istniejące bazy dostają
+  go przy starcie (`CREATE … IF NOT EXISTS`).
   Zweryfikowane `EXPLAIN QUERY PLAN` (rezerwacja, odzyskiwanie, gauge'e,
   retencja — bez `SCAN` tabeli). **Wymóg:** test jednostkowy asertujący
   plan zapytania dla każdego z tych zapytań, żeby regresja nie została
@@ -901,7 +909,8 @@ się tak samo: `api/app.py` (`create_app`) i `worker/app.py`
 - Biblioteka do konfiguracji (np. `pydantic-settings`) i do logów JSON.
 - Sposób wykonywania operacji SQLite poza pętlą zdarzeń.
 - Szczegóły skryptu testu obciążeniowego i formatu raportu.
-- Treść sekcji TODO w README (minimum: HMAC, współdzielony rate limit,
+- Treść sekcji TODO w README (minimum: HMAC i ograniczenie kardynalności
+  `source` w metrykach, współdzielony rate limit,
   pełny stos obserwowalności, PostgreSQL/broker, narzędzie migracji,
   endpoint do ręcznego ponowienia `failed`, endpoint listujący zdarzenia
   `failed`/zaległe dla operatora, dead-letter/alerty,

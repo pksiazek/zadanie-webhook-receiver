@@ -76,14 +76,14 @@ maksimum.
 
 | Tryb | Tempo | mediana | p95 | p99 |
 |---|---|---|---|---|
-| FULL | bez przerw (2171 tx/s seryjnie) | 0,419 ms | 0,624 ms | 0,915 ms |
-| FULL | 100 tx/s | **2,059 ms** | 3,084 ms | 5,496 ms |
-| NORMAL | bez przerw (20790 tx/s seryjnie) | 0,024 ms | 0,062 ms | 0,115 ms |
-| NORMAL | 100 tx/s | 0,206 ms | 0,308 ms | 0,459 ms |
+| FULL | bez przerw (1967 tx/s seryjnie) | 0,442 ms | 0,892 ms | 1,532 ms |
+| FULL | 100 tx/s | **1,998 ms** | 2,899 ms | 5,537 ms |
+| NORMAL | bez przerw (22073 tx/s seryjnie) | 0,023 ms | 0,048 ms | 0,065 ms |
+| NORMAL | 100 tx/s | 0,195 ms | 0,291 ms | 0,423 ms |
 
 Realistyczny koszt to wiersz z tempem 100 tx/s: **ok. 2 ms na zapis** z
 fsync (bez przerw zapisy korzystają z „rozgrzanego” urządzenia, stąd
-0,4 ms). `NORMAL` jest o rząd wielkości tańszy, a mimo to zostaje `FULL`
+0,44 ms). `NORMAL` jest o rząd wielkości tańszy, a mimo to zostaje `FULL`
 — uzasadnienie w [kompromisach](tradeoffs.md#synchronousfull-zamiast-normal). Zastrzeżenie: w maszynie
 wirtualnej OrbStack na macOS fsync może nie wymuszać zapisu na nośnik tak
 jak `F_FULLFSYNC`, więc liczby dla `FULL` mogą być optymistyczne.
@@ -93,8 +93,8 @@ jak `F_FULLFSYNC`, więc liczby dla `FULL` mogą być optymistyczne.
 | Kolejka należnych | claim(20) mediana / p95 | samo zapytanie (bez `COMMIT`) | `COMMIT` mediana |
 |---|---|---|---|
 | 0 | 0,009 / 0,011 ms | 0,005 ms | 0,001 ms |
-| 10 000 | 0,484 / 0,641 ms | 0,047 ms | 0,374 ms |
-| 100 000 | 0,479 / 0,651 ms | 0,048 ms | 0,370 ms |
+| 10 000 | 0,477 / 0,639 ms | 0,045 ms | 0,375 ms |
+| 100 000 | 0,466 / 0,619 ms | 0,046 ms | 0,365 ms |
 
 Koszt rezerwacji **nie zależy od długości kolejki** do 100 000 (= domyślny
 `MAX_BACKLOG`): samo zapytanie to ok. 0,05 ms, reszta to commit z `FULL`.
@@ -108,10 +108,10 @@ płaci dodatkowo za commit.
 
 | Procesy | Łącznie tx/s (mediana / maks.) | Na proces: mediana (min–maks.) | Najdłuższa transakcja | `SQLITE_BUSY` (5 przebiegów) |
 |---|---|---|---|---|
-| 1 | 2264,3 / 2383,5 | 2264 (1889–2384) | 259 ms | 0 |
-| 2 | 2254,7 / 2364,3 | 1131 (207–2158) | 5129 ms | 4 |
-| 4 | 2280,3 / 2399,3 | 567 (0–1492) | 5146 ms | 10 |
-| 8 | 2197,0 / 2293,6 | 180 (0–1065) | 5126 ms | 27 |
+| 1 | 2314,2 / 2396,7 | 2314 (2209–2397) | 18 ms | 0 |
+| 2 | 2305,3 / 2416,4 | 1103 (148–1613) | 5082 ms | 4 |
+| 4 | 2279,9 / 2373,9 | 450 (0–1759) | 5141 ms | 9 |
+| 8 | 2219,5 / 2237,4 | 68 (0–2037) | 5221 ms | 26 |
 
 Wnioski:
 
@@ -120,7 +120,7 @@ Wnioski:
   przepustowości zapisu.
 - **Blokada nie jest sprawiedliwa:** przy nasyceniu część procesów
   „głoduje” (min. 0 tx/s), czeka pełny `busy_timeout` (najdłuższa
-  transakcja ok. 5,1 s) i dostaje `SQLITE_BUSY`. Stąd decyzja: `POST`
+  transakcja ok. 5,1–5,2 s) i dostaje `SQLITE_BUSY`. Stąd decyzja: `POST`
   mapuje `SQLITE_BUSY`/`SQLITE_LOCKED` na `503` + `Retry-After`, a nie
   `500`; worker przeżywa taki błąd (log, odzyskanie rezerwacji).
   `busy_timeout` celowo nie został podniesiony — wydłużyłby tylko ogon
@@ -137,12 +137,32 @@ Wnioski:
 
 | Operacja | n | mediana | p95 |
 |---|---|---|---|
-| czyszczenie payloadu, porcja 1000 | 50 | 1,936 ms | 2,432 ms |
-| usuwanie, porcja 1000 | 50 | 2,073 ms | 6,084 ms |
-| `purge()` 10 000 wierszy (20 porcji) | 5 | 48,574 ms | 49,316 ms |
+| czyszczenie payloadu, porcja 1000 | 50 | 1,815 ms | 1,989 ms |
+| usuwanie, porcja 1000 | 50 | 2,011 ms | 6,526 ms |
+| `purge()` 10 000 wierszy (20 porcji) | 5 | 45,326 ms | 48,326 ms |
 
 Porcja 1000 trzyma blokadę zapisu ok. 2 ms, a każda porcja to osobna
 transakcja, więc zapis zdarzeń przeplata się z retencją. `RETENTION_BATCH_SIZE`
 zostaje 1000 (także gdy trzy workery uruchomią retencję jedna po drugiej).
 Wszystkie zapytania retencji, rezerwacji i odzyskiwania używają indeksów
 (`EXPLAIN QUERY PLAN` w pliku wyników).
+
+**Czyszczenie payloadu przy wielu już wyczyszczonych wierszach** — 10 000
+kwalifikujących się + 100 000 wierszy `completed` w wieku 7–30 dni bez
+payloadu (taki stan ma tabela po tygodniu ruchu):
+
+| Porcja | przed (`ix_events_finished`) | po (`ix_events_purgeable`) |
+|---|---|---|
+| porcja 1000, mediana / p95 | 7,817 / 12,528 ms | 1,801 / 14,978 ms |
+| ostatnia, pusta porcja | 6,561 ms | 0,010 ms |
+
+- Przed poprawką każda porcja przechodziła przez wszystkie wyczyszczone
+  wiersze — koszt rósł liniowo z ich liczbą (ok. 7 ms na 100 000; przy
+  docelowym ruchu ~33 mln wierszy to ok. 2 s blokady zapisu na porcję).
+- Indeks `ix_events_purgeable` zawiera tylko wiersze z payloadem, więc
+  mediana porcji jest taka sama jak bez wyczyszczonych wierszy (ok. 1,8 ms),
+  a pusta porcja kosztuje 0,01 ms.
+- p95 14,978 ms po poprawce to pojedyncze wolne porcje (commit z `FULL`),
+  nie przeszukiwanie — mediana i pusta porcja tego nie wykazują.
+- Kolumna „przed” pochodzi z osobnego przebiegu (`retention --repeat 5`,
+  ten sam benchmark na kodzie sprzed poprawki); nie ma jej w pliku wyników.

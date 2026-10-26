@@ -31,7 +31,7 @@ przy 100 tx/s (0,4 ms bez przerw), `NORMAL` 0,2 ms — wobec potrzebnych
 
 ## Schemat
 
-Jedna tabela `webhook_events` (`STRICT`) i trzy indeksy częściowe
+Jedna tabela `webhook_events` (`STRICT`) i cztery indeksy częściowe
 ([DDL](../src/webhook_receiver/common/db.py)):
 
 - **`id INTEGER PRIMARY KEY` obok `idempotency_key UNIQUE`.** `id` to tylko
@@ -54,8 +54,19 @@ Jedna tabela `webhook_events` (`STRICT`) i trzy indeksy częściowe
   indeksu, więc `ix_events_ready (run_at, status) WHERE status IN
   ('pending','retrying')` obsługuje rezerwację i gauge'e (jako indeks
   pokrywający), `ix_events_leased (run_at) WHERE status = 'processing'` —
-  odzyskiwanie, `ix_events_finished (status, finished_at)` — retencję. Test
-  jednostkowy sprawdza `EXPLAIN QUERY PLAN` każdego z tych zapytań.
+  odzyskiwanie, `ix_events_finished (status, finished_at)` — usuwanie
+  wierszy w retencji.
+- **Osobny indeks do czyszczenia payloadu.** `ix_events_purgeable
+  (finished_at) WHERE status = 'completed' AND payload_json IS NOT NULL`
+  zawiera tylko wiersze, które wciąż mają payload. Bez niego każda porcja
+  przechodziła przez wszystkie wyczyszczone już wiersze `completed` w wieku
+  7–30 dni — pod blokadą zapisu.
+  - Planer bez statystyk `ANALYZE` wybiera `ix_events_finished`, dlatego
+    zapytanie wskazuje indeks przez `INDEXED BY`.
+  - Koszt: jeden wpis indeksu więcej przy zakończeniu zdarzenia.
+  - Istniejące bazy dostają indeks przy starcie (`CREATE … IF NOT
+    EXISTS`).
+- Test jednostkowy sprawdza `EXPLAIN QUERY PLAN` każdego z tych zapytań.
 - **Kontrola numeru próby zamiast `lease_owner`** — `attempts` jest
   znacznikiem rezerwacji; identyfikator workera trafia do logów, spanów i
   `result_json`, nie do schematu. Usunięte jako zbędne: `max_attempts`
