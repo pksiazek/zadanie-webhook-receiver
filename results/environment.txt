@@ -1,0 +1,17 @@
+# Load test environment (2026-10-26T12:17Z)
+host nproc: 10
+host memory: 11Gi
+cpu: Apple Silicon (vendor "Apple", 10 cores), OrbStack Linux VM on macOS; devcontainer with docker-in-docker
+arch: aarch64
+kernel: 7.2.12-orbstack-00394-gbecdd6130068
+docker server: 29.9.2
+docker info: CPUs=10 Mem=12599537664 OS=Debian GNU/Linux 13 (trixie) (containerized) Storage=overlayfs
+compose: 2.40.3
+image: webhook-receiver:local sha256:1011b1ee1f96
+base image: python:3.14-slim-trixie
+python (image): 3.14.9
+sqlite (image): 3.46.1
+httpx: 0.28.1
+jaeger: jaegertracing/jaeger:2.22.0 (OTLP traces exported during runs)
+topology: api x1, worker x3 x WORKER_CONCURRENCY=20 (steady, burst); worker x N=1,2,3 (scaling)
+git base: f76ba79
