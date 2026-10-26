@@ -173,6 +173,42 @@ def test_pool_returns_connection_per_thread(tmp_path):
         main.execute("SELECT 1")
 
 
+def test_pool_closes_connections_of_dead_threads(tmp_path):
+    pool = ConnectionPool(tmp_path / "a.db")
+    dead = []
+    t = threading.Thread(target=lambda: dead.append(pool.get()))
+    t.start()
+    _join_all([t])
+    main = pool.get()  # a new connection prunes the dead thread's one
+    with pytest.raises(sqlite3.ProgrammingError):
+        dead[0].execute("SELECT 1")
+    assert list(pool._all) == [main]
+    pool.close_all()
+
+
+def test_pool_keeps_connections_of_live_threads(tmp_path):
+    pool = ConnectionPool(tmp_path / "a.db")
+    got, release = threading.Event(), threading.Event()
+    live = []
+
+    def hold():
+        live.append(pool.get())
+        got.set()
+        release.wait(timeout=10)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert got.wait(timeout=10)
+    try:
+        main = pool.get()
+        assert live[0].execute("SELECT 1").fetchone()[0] == 1
+        assert list(pool._all) == [live[0], main]
+    finally:
+        release.set()
+        _join_all([t])
+    pool.close_all()
+
+
 def test_event_payload_purged():
     kwargs = dict(
         id=1, idempotency_key="k", source="s", event_type="t",
