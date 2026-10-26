@@ -11,8 +11,8 @@ Prototyp serwisu HTTP, który:
 Rozwiązanie [zadania rekrutacyjnego](https://gist.github.com/kaluzaaa/fcd035829013d9952f71a9a6a59a4d2f#file-gist_webhook_receiver-md).
 
 **Stos:** Python 3.14, FastAPI, SQLite (WAL) jako magazyn **i** kolejka,
-osobne procesy `api` i `worker`, OpenTelemetry (ślady w Jaegerze, metryki
-Prometheus, logi JSON).
+osobne procesy `api` i `worker`, OpenTelemetry (Collector, ślady w
+Jaegerze, metryki Prometheus, logi JSON).
 
 **Szczegóły:** [konfiguracja](docs/configuration.md) ·
 [operacje](docs/operations.md) · [wyniki](docs/results.md) ·
@@ -64,12 +64,14 @@ flowchart LR
         API["api<br/>FastAPI, jeden proces uvicorn<br/>limit body, walidacja,<br/>rate limit per X-Source,<br/>backpressure<br/>/health /ready /metrics"]
         DB[("SQLite WAL<br/>nazwany wolumen")]
         W["worker x N<br/>asyncio, 20 slotów<br/>symulacja, ponowienia,<br/>odzyskanie rezerwacji, retencja<br/>/health /metrics na 9100"]
+        OC["OTel Collector<br/>Prometheus :8889"]
         J["Jaeger v2"]
     end
     API -- "zapis zdarzenia<br/>INSERT, BEGIN IMMEDIATE" --> DB
     W -- "rezerwacja UPDATE ... RETURNING<br/>wynik z kontrolą numeru próby" --> DB
-    API -. "OTLP (ślady)" .-> J
-    W -. "OTLP (ślady)" .-> J
+    API -. "OTLP (ślady, metryki)" .-> OC
+    W -. "OTLP (ślady, metryki)" .-> OC
+    OC -. "OTLP (ślady)" .-> J
 ```
 
 - **api** zapisuje zdarzenie i odpowiada `202`. Niczego nie przetwarza,
@@ -80,6 +82,8 @@ flowchart LR
   - zapisuje wynik albo planuje ponowienie z wykładniczym odstępem,
   - dobiera pracę od razu po zwolnieniu slotu; gdy nie było nic do
     pobrania, sprawdza kolejkę co `POLL_INTERVAL_SECONDS` (0,5 s).
+- **OTel Collector** zbiera ślady i metryki wszystkich procesów. Ślady
+  przekazuje do Jaegera, metryki wystawia na jednym endpoincie Prometheus.
 - **Ślad** przechodzi przez granicę procesów. API zapisuje W3C
   `traceparent` w wierszu zdarzenia, a worker tworzy z niego span
   `webhook.process` dla każdej próby.
@@ -144,7 +148,7 @@ zewnętrznego systemu, żeby rozpoznał powtórkę i ją pominął.
 **Docker** — dowolny host z Docker Engine i Compose v2 (obraz amd64/arm64):
 
 ```bash
-docker compose up -d --build --wait           # api + 3 workery + Jaeger
+docker compose up -d --build --wait           # api + 3 workery + Collector + Jaeger
 docker compose ps                             # api i workery: (healthy)
 docker compose up -d --wait --scale worker=5  # więcej workerów
 docker compose down                           # dane zostają; down -v usuwa też dane
@@ -152,6 +156,7 @@ docker compose down                           # dane zostają; down -v usuwa te�
 
 - API: `localhost:8000`
 - Jaeger UI: `localhost:16686`
+- metryki wszystkich procesów (Collector): `localhost:8889/metrics`
 - porty i wymagania →
   [docs/configuration.md](docs/configuration.md#docker-wymagania-i-porty)
 - pętla restartów przy błędzie konfiguracji →
@@ -306,20 +311,35 @@ Przejścia z dokładnymi warunkami →
   - `webhook_queue_oldest_pending_age_seconds` — sygnał „nikt nie
     przetwarza”.
 - **Metryki workera:** `/metrics` na porcie 9100 (w sieci compose).
+- **Wszystkie metryki naraz:** Collector na `localhost:8889/metrics`.
+  Procesy rozróżnia etykieta `job` (`webhook-api`, `webhook-worker`) i
+  `instance` (`<hostname>-<pid>`).
 - **Ślady** w Jaegerze (`localhost:16686`): `POST /webhooks` i
   `webhook.process` dla każdej próby — w jednym śladzie.
 - **Logi** JSON na stdout, z `trace_id`, `idempotency_key` i `source`
   (nigdy payload).
-- **Ile workerów działa:** `docker compose ps worker` (kontenery
-  `(healthy)`). Pod obciążeniem `webhook_queue_depth{status="processing"}`
-  ≈ N × 20.
 
 **Więcej:**
 
-- tabele metryk, ślad z `traceparent`, logi, liczba workerów →
+- tabele metryk, Collector, ślad z `traceparent`, logi, liczba workerów →
   [docs/operations.md](docs/operations.md#obserwowalność)
 - zapytania `sqlite3` (lista `failed`, zaległe, kopia bazy) →
   [docs/operations.md](docs/operations.md#sqlite-dla-operatora)
+
+### Ile workerów działa
+
+Każdy worker raportuje `webhook_worker_up` = 1, więc liczba serii = liczba
+workerów:
+
+```bash
+curl -s localhost:8889/metrics | grep -c '^webhook_worker_up'   # np. 3
+docker compose ps worker                                       # kontenery (healthy)
+```
+
+- Seria zatrzymanego workera znika po ~30 s (`metric_expiration`).
+- Po restarcie workera licznik może przez te ~30 s pokazywać o 1 za dużo
+  (nowy proces = nowa seria).
+- Pod obciążeniem także `webhook_queue_depth{status="processing"}` ≈ N × 20.
 
 ## Wyniki
 
@@ -431,9 +451,9 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
   statystyk — wiele procesów uvicorn / instancji.
 - **Wyjście poza jeden host i jednego pisarza SQLite:** PostgreSQL
   (`SELECT … FOR UPDATE SKIP LOCKED`) albo broker z outboxem.
-- **OpenTelemetry Collector w compose:** zbiorczy endpoint Prometheus,
-  metryka `webhook_worker_up` per `service.instance.id` (= liczba
-  workerów), pełny stos Prometheus/Grafana/Tempo z dashboardami.
+- **Pełny stos obserwowalności:** Prometheus, Grafana i Tempo z
+  dashboardami (dziś Collector wystawia tylko endpoint `:8889`, bez
+  przechowywania historii).
 - **Alerty** (`webhook_queue_oldest_pending_age_seconds`, przyrost
   `failed`, `db_busy`) i dead-letter dla `failed`.
 - **Endpointy operatora:** ręczne ponowienie `failed`, lista `failed` i
@@ -467,6 +487,7 @@ results/        wyniki testu obciążeniowego i benchmarków
 docs/           configuration.md, operations.md, results.md, tradeoffs.md, superpowers/specs/
 ```
 
+- `otel-collector.yaml` — konfiguracja Collectora.
 - `api` i `worker` importują tylko z `common` (pilnuje tego test
   architektury).
 - Jeden obraz Dockera, dwie komendy, użytkownik inny niż root.

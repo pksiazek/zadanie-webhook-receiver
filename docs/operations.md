@@ -205,6 +205,7 @@ Worker (port 9100 w sieci compose; w trybie `EMBEDDED_WORKER` na
 | `webhook_processing_duration_seconds{outcome}` | histogram czasu próby |
 | `webhook_lease_recoveries_total` | odzyskane rezerwacje (po awarii workera) |
 | `webhook_stale_results_total` | wyniki odrzucone przez kontrolę numeru próby |
+| `webhook_worker_up` | 1, dopóki proces workera działa (jedna seria na proces) |
 
 Liczniki pojawiają się na `/metrics` dopiero po pierwszym zdarzeniu danego
 rodzaju. Metryki workera odczytuje się per kontener:
@@ -215,10 +216,43 @@ docker compose exec --index 1 worker python -c \
   | grep ^webhook
 ```
 
+### Collector (wszystkie metryki naraz)
+
+Compose zawiera OpenTelemetry Collector
+(`otel/opentelemetry-collector-contrib:0.163.2`, konfiguracja
+`otel-collector.yaml`):
+
+- API i workery wypychają do niego metryki i ślady przez OTLP/HTTP co 5 s
+  (`OTEL_METRICS_EXPORTER=otlp`, `OTEL_METRIC_EXPORT_INTERVAL=5000`).
+- Ślady przekazuje do Jaegera (OTLP gRPC).
+- Metryki wszystkich procesów wystawia na jednym endpoincie Prometheus:
+  `localhost:8889/metrics`.
+
+Te same nazwy metryk co wyżej, z dodatkowymi etykietami:
+
+- `job` — `webhook-api` albo `webhook-worker` (`service.name`),
+- `instance` — `<hostname>-<pid>` procesu (`service.instance.id`),
+- `otel_scope_*` — zakres instrumentacji (stały).
+
+```bash
+curl -s localhost:8889/metrics | grep '^webhook_attempts_total'
+# webhook_attempts_total{instance="05f377d57b85-7",job="webhook-worker",...,outcome="success"} 42
+```
+
+Seria, której żaden proces nie odświeżył przez 30 s
+(`metric_expiration`), znika z endpointu. Lokalne `/metrics` (API i
+worker :9100) działają dalej — test obciążeniowy próbkuje `/metrics` API.
+
+Collector nie przechowuje historii — to tylko punkt zbiorczy do scrape'u
+(Prometheus/Grafana → [TODO](../README.md#todo)). Obraz jest distroless
+(bez powłoki), więc nie ma healthchecka; API startuje po
+`service_started` Collectora, a eksportery OTLP ponawiają i odrzucają dane,
+nigdy nie blokują aplikacji.
+
 ### Ślady (Jaeger)
 
 Compose zawiera Jaeger v2 (`jaegertracing/jaeger:2.22.0`); API i workery
-eksportują ślady przez OTLP. UI: <http://localhost:16686>, usługi
+eksportują ślady przez OTLP do Collectora, a ten do Jaegera. UI: <http://localhost:16686>, usługi
 `webhook-api` i `webhook-worker`. Jeden ślad zawiera span `POST /webhooks`
 i jako jego dzieci spany `webhook.process` — po jednym na każdą próbę
 (atrybuty `attempt`, `idempotency_key`, `source`, `event_type`,
@@ -256,20 +290,34 @@ docker compose logs --no-log-prefix worker | grep '"event": "lease_recovered"'
 ### Ile workerów działa
 
 API nie śledzi workerów (brak tabeli heartbeatów — świadoma decyzja), więc
-liczby workerów nie widać w żadnej metryce API. Źródła:
+liczby workerów nie widać w metrykach API. Źródła:
 
-1. **`docker compose ps worker`** — liczba kontenerów workera w stanie
+1. **`webhook_worker_up` w Collectorze** — każdy proces workera raportuje
+   1, więc liczba serii = liczba workerów:
+   ```bash
+   curl -s localhost:8889/metrics | grep -c '^webhook_worker_up'
+   # 3; po --scale worker=5: 5
+   curl -s localhost:8889/metrics | grep '^webhook_worker_up'
+   # webhook_worker_up{instance="05f377d57b85-7",job="webhook-worker",...} 1
+   ```
+   - Po zatrzymaniu workera (`stop`, `--scale` w dół, `SIGKILL`) jego
+     seria znika po ~30 s (`metric_expiration`; zmierzone: 30 s).
+   - Restart procesu = nowy `instance`; przez te ~30 s licznik może być
+     o 1 za wysoki.
+   - Nowy worker pojawia się po pierwszym eksporcie (≤ 5 s).
+   - W trybie `EMBEDDED_WORKER` seria ma `job="webhook-api"`.
+2. **`docker compose ps worker`** — liczba kontenerów workera w stanie
    `(healthy)`; healthcheck odpytuje `/health` workera co 5 s.
-2. `/health` konkretnego workera:
+3. `/health` konkretnego workera:
    ```bash
    docker compose exec --index 2 worker python -c \
      "import urllib.request; print(urllib.request.urlopen('http://localhost:9100/health').read())"
    ```
-3. Pod obciążeniem `webhook_queue_depth{status="processing"}` ≈ liczba
+4. Pod obciążeniem `webhook_queue_depth{status="processing"}` ≈ liczba
    workerów × 20 (w teście `steady` i `burst`: 60 przy 3 workerach).
-4. `webhook_queue_oldest_pending_age_seconds` rosnący mimo „zdrowych”
+5. `webhook_queue_oldest_pending_age_seconds` rosnący mimo „zdrowych”
    kontenerów = workery nie nadążają albo nie przetwarzają.
-5. Rozkład pracy między workery w bazie: zapytanie po
+6. Rozkład pracy między workery w bazie: zapytanie po
    `json_extract(result_json, '$.processed_by')` w następnej sekcji.
 
 ## SQLite dla operatora

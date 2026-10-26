@@ -14,8 +14,10 @@ workera w `docker compose ps` (`unhealthy` albo brak kontenerów) i rosnący
 `webhook_queue_oldest_pending_age_seconds`. Świadome ograniczenie: **przy
 pustej kolejce API nie odróżnia bezczynnego workera od martwego** — nie ma
 tabeli heartbeatów (usunięta jako zbędna złożoność; wykrycie awarii
-przejmuje healthcheck Dockera). Rozwiązanie docelowe: OpenTelemetry
-Collector i metryka per worker (→ [TODO](../README.md#todo)).
+przejmuje healthcheck Dockera). Liczbę żywych workerów pokazuje za to
+metryka `webhook_worker_up` w OpenTelemetry Collectorze (jedna seria na
+proces, → [operacje](operations.md#ile-workerów-działa)); API z niej nie
+korzysta.
 
 ## `synchronous=FULL` zamiast `NORMAL`
 

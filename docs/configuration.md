@@ -39,9 +39,16 @@ SIMULATED_MAX_SECONDS`, `BACKOFF_MAX_SECONDS ≥ BACKOFF_BASE_SECONDS`).
 
 ## OpenTelemetry
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` przełącza eksport śladów na
-OTLP/HTTP (w compose `http://jaeger:4318`); `OTEL_TRACES_EXPORTER`
-(`otlp`, `console`, `none`) wybiera eksporter jawnie. `OTEL_SERVICE_NAME`
+| Zmienna | W compose | Znaczenie |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` | adres OTLP/HTTP; samo ustawienie przełącza eksport śladów na OTLP |
+| `OTEL_TRACES_EXPORTER` | — | `otlp`, `console`, `none` — jawny wybór eksportera śladów |
+| `OTEL_METRICS_EXPORTER` | `otlp` | `otlp` (także na liście, np. `prometheus,otlp`) dodaje wypychanie metryk przez OTLP; domyślnie tylko lokalne `/metrics` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `5000` | co ile ms wypychać metryki (domyślnie SDK: 60000) |
+
+Lokalne `/metrics` (API, worker :9100) działają zawsze, niezależnie od
+`OTEL_METRICS_EXPORTER`. Bez Collectora (np. tryb lokalny) domyślnie ślady
+idą na konsolę (stderr), a metryki tylko na `/metrics`. `OTEL_SERVICE_NAME`
 **nie jest uwzględniany** — nazwy usług (`webhook-api`, `webhook-worker`)
 są ustawione w kodzie (→ [TODO](../README.md#todo)).
 
@@ -49,11 +56,12 @@ są ustawione w kodzie (→ [TODO](../README.md#todo)).
 
 Wymagania: Docker Engine z Compose v2 (Linux, macOS z Docker
 Desktop/OrbStack, Windows z WSL2). Obraz bazowy `python:3.14-slim-trixie`
-jest wieloarchitekturowy (amd64, arm64); baza leży na nazwanym wolumenie,
-bez bind mountów.
+jest wieloarchitekturowy (amd64, arm64); baza leży na nazwanym wolumenie.
+Jedyny bind mount to konfiguracja Collectora (`otel-collector.yaml`, tylko
+do odczytu).
 
 ```bash
-docker compose up -d --build --wait   # api + 3 workery + Jaeger
+docker compose up -d --build --wait   # api + 3 workery + Collector + Jaeger
 docker compose ps                     # api i workery: (healthy)
 curl -s localhost:8000/ready          # {"status":"ready"}
 ```
@@ -66,6 +74,7 @@ wolumenie `webhook-data`) albo `docker compose down -v` (także dane).
 |---|---|---|
 | API | `http://localhost:8000` | port hosta: zmienna `API_PORT` (np. `API_PORT=8080 docker compose up -d`) |
 | Jaeger UI | `http://localhost:16686` | port hosta: zmienna `JAEGER_UI_PORT` |
+| Collector, metryki wszystkich procesów | `http://localhost:8889/metrics` | port hosta: zmienna `COLLECTOR_METRICS_PORT`; OTLP (4317, 4318) tylko w sieci compose |
 | worker `/health`, `/metrics` | port 9100 tylko w sieci compose | celowo niepublikowany — `--scale` nie koliduje o port |
 
 ## Tryb lokalny (uv)
