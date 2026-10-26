@@ -8,7 +8,8 @@ short duration) and, in the process scenarios, a separate
 import os
 
 from tests.fakes import GIST_WEBHOOKS
-from tests.integration.conftest import (
+from tests.integration.helpers import (
+    assert_settled,
     make_settings,
     post,
     serve,
@@ -87,6 +88,7 @@ async def test_duplicate_during_processing_not_reprocessed(tmp_path):
         assert after["result"] == done["result"]
         assert after["attempts"] == 1
         assert after["finished_at"] == done["finished_at"]
+        await assert_settled(client, key, done, settings)
 
 
 async def test_restart_api_and_worker_preserves_events(tmp_path):
@@ -111,10 +113,12 @@ async def test_restart_api_and_worker_preserves_events(tmp_path):
             _assert_completed_once(body, EMBEDDED_ID)
         # A client that never got its 202 before the restart retries
         # (spec §4): it gets the stored event, nothing is reprocessed.
+        before = (await client.get(f"/webhooks/{keys[0]}")).json()
         retried = await post(client, _webhook(keys[0]), expected=200)
         assert retried["duplicate"] is True
         assert retried["status"] == "completed"
         assert retried["attempts"] == 1
+        await assert_settled(client, keys[0], before, settings)
 
 
 async def test_separate_worker_process_shares_database(tmp_path):
@@ -125,7 +129,7 @@ async def test_separate_worker_process_shares_database(tmp_path):
         with worker_process(settings, tmp_path / "worker.log") as worker:
             await post(client, webhook)
             body = await wait_for_status(
-                client, key, "completed", diagnostics=worker.diagnostics
+                client, key, "completed", worker=worker
             )
             # Processed by the subprocess, not by anything in this one.
             _assert_completed_once(body, worker.worker_id)
@@ -151,7 +155,7 @@ async def test_crashed_worker_lease_is_recovered(tmp_path):
         with worker_process(slow, tmp_path / "w1.log") as first:
             await post(client, webhook)
             claimed = await wait_for_status(
-                client, key, "processing", diagnostics=first.diagnostics
+                client, key, "processing", worker=first
             )
             assert claimed["attempts"] == 1
             exit_code = await first.kill()
@@ -165,7 +169,7 @@ async def test_crashed_worker_lease_is_recovered(tmp_path):
 
         with worker_process(fast, tmp_path / "w2.log") as second:
             body = await wait_for_status(
-                client, key, "completed", diagnostics=second.diagnostics
+                client, key, "completed", worker=second
             )
             assert body["attempts"] == 2
             assert body["result"]["attempt"] == 2

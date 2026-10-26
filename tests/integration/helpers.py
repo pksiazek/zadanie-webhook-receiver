@@ -12,7 +12,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,9 @@ SRC = {"X-Source": "e2e"}
 # Upper bound for any single wait in these tests.
 WAIT_SECONDS = 10.0
 POLL_SECONDS = 0.05
+SUBPROCESS_GRACE_SECONDS = 2
+# Worker poll intervals to wait before re-reading a settled event.
+SETTLE_POLLS = 5
 
 # Fast simulation: the five gist events finish well under a second.
 FAST = {
@@ -68,6 +71,9 @@ def settings_env(settings: Settings) -> dict[str, str]:
             "OTEL_TRACES_EXPORTER": "none",
             "LOG_LEVEL": "INFO",
             "PYTHONUNBUFFERED": "1",
+            # Well below WAIT_SECONDS, so terminate() has margin to
+            # observe the exit after a full drain.
+            "SHUTDOWN_GRACE_SECONDS": str(SUBPROCESS_GRACE_SECONDS),
         }
     )
     return env
@@ -102,12 +108,21 @@ async def wait_for_status(
     key: str,
     status: str,
     timeout: float = WAIT_SECONDS,
-    diagnostics: Callable[[], str] | None = None,
+    worker: WorkerProcess | None = None,
 ) -> dict:
-    """Poll ``GET /webhooks/{key}`` until ``status`` or fail on timeout."""
+    """Poll ``GET /webhooks/{key}`` until ``status`` or fail on timeout.
+
+    With ``worker``, fails at once if that subprocess has exited and
+    appends its exit code and log tail to the failure message.
+    """
     deadline = time.monotonic() + timeout
     body: Any = None
     while True:
+        if worker is not None and worker.proc.poll() is not None:
+            raise AssertionError(
+                f"worker exited while waiting for {key!r} to reach"
+                f" {status!r}{worker.diagnostics()}"
+            )
         response = await client.get(f"/webhooks/{key}")
         body = response.json()
         if response.status_code == 200 and body["status"] == status:
@@ -116,9 +131,26 @@ async def wait_for_status(
             raise AssertionError(
                 f"{key!r} did not reach {status!r} within {timeout}s;"
                 f" last response {response.status_code}: {body}"
-                f"{diagnostics() if diagnostics else ''}"
+                f"{worker.diagnostics() if worker else ''}"
             )
         await asyncio.sleep(POLL_SECONDS)
+
+
+async def assert_settled(
+    client: httpx.AsyncClient, key: str, expected: dict, settings: Settings
+) -> None:
+    """After a few worker polls, the event must still equal ``expected``.
+
+    Catches a duplicate that re-enqueued a finished event: a worker
+    would claim it again and change ``attempts``/``result``.
+    """
+    await asyncio.sleep(SETTLE_POLLS * settings.poll_interval_seconds)
+    response = await client.get(f"/webhooks/{key}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    for field in ("status", "attempts", "result", "finished_at"):
+        assert body[field] == expected[field], (field, body, expected)
+    assert body["attempts"] == 1, body
 
 
 class WorkerProcess:
@@ -126,15 +158,20 @@ class WorkerProcess:
 
     def __init__(self, settings: Settings, log_path: Path) -> None:
         self.log_path = log_path
-        self._log = log_path.open("wb")
-        self.proc = subprocess.Popen(
-            [sys.executable, "-m", "webhook_receiver", "worker"],
-            cwd=REPO_ROOT,
-            env=settings_env(settings),
-            stdin=subprocess.DEVNULL,
-            stdout=self._log,
-            stderr=subprocess.STDOUT,
-        )
+        log = log_path.open("wb")
+        try:
+            self.proc = subprocess.Popen(
+                [sys.executable, "-m", "webhook_receiver", "worker"],
+                cwd=REPO_ROOT,
+                env=settings_env(settings),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        except BaseException:
+            log.close()
+            raise
+        self._log = log
 
     @property
     def worker_id(self) -> str:
