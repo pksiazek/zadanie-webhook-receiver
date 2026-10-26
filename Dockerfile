@@ -25,7 +25,7 @@ RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
 # Non-root user; /data is owned by it so an empty named volume mounted
 # there inherits that owner on first use.
 RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --no-create-home app \
+    && useradd --uid 10001 --gid app --no-create-home app \
     && mkdir -p /data \
     && chown app:app /data
 
