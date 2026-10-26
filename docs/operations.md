@@ -243,11 +243,14 @@ Seria, której żaden proces nie odświeżył przez 30 s
 (`metric_expiration`), znika z endpointu. Lokalne `/metrics` (API i
 worker :9100) działają dalej — test obciążeniowy próbkuje `/metrics` API.
 
-Collector nie przechowuje historii — to tylko punkt zbiorczy do scrape'u
-(Prometheus/Grafana → [TODO](../README.md#todo)). Obraz jest distroless
-(bez powłoki), więc nie ma healthchecka; API startuje po
-`service_started` Collectora, a eksportery OTLP ponawiają i odrzucają dane,
-nigdy nie blokują aplikacji.
+Collector nie przechowuje historii — to tylko punkt zbiorczy do
+odpytywania przez Prometheus (Prometheus/Grafana →
+[TODO](../README.md#todo)). Obraz jest distroless (bez powłoki), więc nie
+ma healthchecka; API startuje po `service_started` Collectora. Gdy
+Collector nie działa, eksportery OTLP w tle ponawiają wysyłkę, a potem
+odrzucają dane — żądania na nie nie czekają. Czeka tylko końcowe
+wypchnięcie przy zamykaniu, ograniczone przez `OTEL_EXPORTER_OTLP_TIMEOUT`
+(w compose 3 s).
 
 ### Ślady (Jaeger)
 
@@ -268,9 +271,12 @@ curl -s localhost:16686/api/v3/services
 
 Ślad konkretnego zdarzenia: identyfikator śladu to znaki 4–35 kolumny
 `traceparent` (format W3C `00-<trace_id>-<span_id>-01`), więc link do UI
-daje zapytanie
-`SELECT 'http://localhost:16686/trace/' || substr(traceparent, 4, 32) FROM webhook_events WHERE idempotency_key = 'evt-001';`
-([jak uruchomić zapytanie](#sqlite-dla-operatora)).
+daje zapytanie ([jak je uruchomić](#sqlite-dla-operatora)):
+
+```sql
+SELECT 'http://localhost:16686/trace/' || substr(traceparent, 4, 32)
+FROM webhook_events WHERE idempotency_key = 'evt-001';
+```
 
 ### Logi
 
@@ -302,8 +308,10 @@ liczby workerów nie widać w metrykach API. Źródła:
    ```
    - Po zatrzymaniu workera (`stop`, `--scale` w dół, `SIGKILL`) jego
      seria znika po ~30 s (`metric_expiration`; zmierzone: 30 s).
-   - Restart procesu = nowy `instance`; przez te ~30 s licznik może być
-     o 1 za wysoki.
+   - Nowy kontener (`--scale`, ponowne utworzenie) może przez te ~30 s
+     zawyżać licznik o 1. Restart w miejscu (np. po awarii procesu —
+     Docker restartuje kontener) zachowuje ten sam `instance`: hostname
+     się nie zmienia, a PID pod tini jest ten sam.
    - Nowy worker pojawia się po pierwszym eksporcie (≤ 5 s).
    - W trybie `EMBEDDED_WORKER` seria ma `job="webhook-api"`.
 2. **`docker compose ps worker`** — liczba kontenerów workera w stanie

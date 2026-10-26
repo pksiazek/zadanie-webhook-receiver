@@ -609,8 +609,10 @@ build SQLite).
     `job="webhook-worker"`), więc liczba workerów = liczba serii:
     `curl -s localhost:8889/metrics | grep -c '^webhook_worker_up'`.
   - `metric_expiration: 30s`: seria zatrzymanego (lub zabitego) workera
-    znika z endpointu ~30 s po ostatnim eksporcie. Restart procesu daje
-    nowy `instance`, więc przez ≤ 30 s licznik może być o 1 za wysoki.
+    znika z endpointu ~30 s po ostatnim eksporcie. Nowy kontener
+    (`--scale`, ponowne utworzenie) może przez ≤ 30 s zawyżać licznik o 1;
+    restart w miejscu zachowuje ten sam `instance` (ten sam hostname, ten
+    sam PID pod tini).
     W trybie `EMBEDDED_WORKER` seria pochodzi z procesu API
     (`job="webhook-api"`).
   - Lokalne `/metrics` (API, worker :9100) działają bez zmian — czytnik

@@ -4,8 +4,14 @@
 
 # Traces and metrics go over OTLP to the Collector (spec §12); the local
 # /metrics endpoints stay as they were.
+# OTEL_EXPORTER_OTLP_TIMEOUT is in SECONDS in the Python SDK (1.45; the
+# OTel spec says ms) and is one deadline across all retries of an
+# export. It bounds the exit flush: SHUTDOWN_GRACE_SECONDS (10 s) +
+# final metric push (<= 3 s) + span flush (<= 3 s) ~ 16 s, inside the
+# worker's stop_grace_period of 20 s.
 x-otel-env: &otel-env
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_EXPORTER_OTLP_TIMEOUT: "3"
   OTEL_METRICS_EXPORTER: otlp
   OTEL_METRIC_EXPORT_INTERVAL: "5000"
 
@@ -89,8 +95,10 @@ services:
 
   otel-collector:
     # Distroless image (no shell, no curl): no healthcheck. The apps
-    # tolerate a Collector that is not up yet - the OTLP exporters
-    # retry and drop data, never block - so service_started suffices.
+    # tolerate a Collector that is down: at runtime the OTLP exporters
+    # retry in background threads and then drop data (requests never
+    # wait on them); only the exit flush waits, bounded by
+    # OTEL_EXPORTER_OTLP_TIMEOUT. So service_started suffices.
     image: otel/opentelemetry-collector-contrib:0.163.2
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     restart: unless-stopped

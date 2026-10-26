@@ -337,8 +337,9 @@ docker compose ps worker                                       # kontenery (heal
 ```
 
 - Seria zatrzymanego workera znika po ~30 s (`metric_expiration`).
-- Po restarcie workera licznik może przez te ~30 s pokazywać o 1 za dużo
-  (nowy proces = nowa seria).
+- Nowy kontener (`--scale`, ponowne utworzenie) może przez te ~30 s
+  zawyżać licznik o 1. Restart w miejscu (np. po awarii procesu) zachowuje
+  ten sam `instance`, więc licznik się nie zmienia.
 - Pod obciążeniem także `webhook_queue_depth{status="processing"}` ≈ N × 20.
 
 ## Wyniki

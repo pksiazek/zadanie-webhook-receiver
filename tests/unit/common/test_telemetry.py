@@ -9,7 +9,10 @@ from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     OTLPSpanExporter,
 )
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.export import (
+    MetricExportResult,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -294,6 +297,8 @@ def fresh_setup(monkeypatch):
 
     The global providers can be set only once per process, so the
     setters are replaced and the built providers shut down afterwards.
+    OTLP export is stubbed: the shutdown's final flush must never touch
+    the network, whatever instruments exist by then.
     """
     for name in (
         "OTEL_METRICS_EXPORTER",
@@ -304,6 +309,11 @@ def fresh_setup(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OTEL_TRACES_EXPORTER", "none")
+    monkeypatch.setattr(
+        OTLPMetricExporter,
+        "export",
+        lambda *_args, **_kwargs: MetricExportResult.SUCCESS,
+    )
     captured = {}
     monkeypatch.setattr(telemetry, "_configured", False)
     monkeypatch.setattr(
@@ -348,7 +358,7 @@ def test_setup_metrics_prometheus_only_by_default(fresh_setup):
 def test_setup_metrics_without_otlp(fresh_setup, value):
     env, readers = fresh_setup
     env.setenv("OTEL_METRICS_EXPORTER", value)
-    env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://x:4318")
+    env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
     assert _reader_types(readers()) == ["PrometheusMetricReader"]
 
 
@@ -356,7 +366,7 @@ def test_setup_metrics_without_otlp(fresh_setup, value):
 def test_setup_metrics_otlp_adds_periodic_reader(fresh_setup, value):
     env, readers = fresh_setup
     env.setenv("OTEL_METRICS_EXPORTER", value)
-    env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://x:4318")
+    env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
     env.setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
     found = readers()
     assert _reader_types(found) == [

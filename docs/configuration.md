@@ -45,6 +45,7 @@ SIMULATED_MAX_SECONDS`, `BACKOFF_MAX_SECONDS ≥ BACKOFF_BASE_SECONDS`).
 | `OTEL_TRACES_EXPORTER` | — | `otlp`, `console`, `none` — jawny wybór eksportera śladów |
 | `OTEL_METRICS_EXPORTER` | `otlp` | `otlp` (także na liście, np. `prometheus,otlp`) dodaje wypychanie metryk przez OTLP; domyślnie tylko lokalne `/metrics` |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `5000` | co ile ms wypychać metryki (domyślnie SDK: 60000) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `3` | limit jednej wysyłki OTLP łącznie z ponowieniami, **w sekundach** (SDK Pythona; specyfikacja OTel podaje ms); ogranicza końcowe wypchnięcie przy zamykaniu |
 
 Lokalne `/metrics` (API, worker :9100) działają zawsze, niezależnie od
 `OTEL_METRICS_EXPORTER`. Bez Collectora (np. tryb lokalny) domyślnie ślady
