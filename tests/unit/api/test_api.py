@@ -303,21 +303,28 @@ async def test_lock_contention_in_backpressure_lookup_is_503(
     app.state.stats.refresh()
     exc = _sqlite_error(sqlite3.SQLITE_BUSY, "SQLITE_BUSY")
     monkeypatch.setattr(app.state.repo, "get", _fail_with(exc))
+    before = await _count(client, "shop", "db_busy")
     r = await client.post("/webhooks", json=_webhook("B"), headers=SRC)
     assert r.status_code == 503
     assert r.json() == {"detail": "database busy, retry later"}
     assert r.headers["retry-after"] == "5"
+    assert await _count(client, "shop", "db_busy") - before == 1
 
 
 async def test_real_write_lock_contention_is_503(
     client, app, monkeypatch, tmp_path
 ):
     insert = app.state.repo.insert_or_get
+    left_in_transaction = []
 
     def impatient_insert(*args, **kwargs):
         # Runs on the request's threadpool thread, i.e. on its connection.
-        app.state.pool.get().execute("PRAGMA busy_timeout=50")
-        return insert(*args, **kwargs)
+        conn = app.state.pool.get()
+        conn.execute("PRAGMA busy_timeout=50")
+        try:
+            return insert(*args, **kwargs)
+        finally:
+            left_in_transaction.append(conn.in_transaction)
 
     monkeypatch.setattr(app.state.repo, "insert_or_get", impatient_insert)
     holder = sqlite3.connect(tmp_path / "a.db", autocommit=True)
@@ -325,6 +332,8 @@ async def test_real_write_lock_contention_is_503(
         holder.execute("BEGIN IMMEDIATE")
         r = await client.post("/webhooks", json=_webhook("A"), headers=SRC)
         assert r.status_code == 503
+        # The failed BEGIN IMMEDIATE leaves the pooled connection clean.
+        assert left_in_transaction == [False]
         holder.execute("ROLLBACK")
     finally:
         holder.close()

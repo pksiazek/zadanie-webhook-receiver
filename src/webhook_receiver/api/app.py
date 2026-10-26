@@ -86,7 +86,7 @@ def _readiness(pool: ConnectionPool) -> list[str]:
 def _is_lock_contention(exc: sqlite3.Error) -> bool:
     """SQLITE_BUSY or SQLITE_LOCKED, extended codes included."""
     code = getattr(exc, "sqlite_errorcode", None)
-    return code is not None and code & 0xFF in (
+    return code is not None and (code & 0xFF) in (
         sqlite3.SQLITE_BUSY,
         sqlite3.SQLITE_LOCKED,
     )
