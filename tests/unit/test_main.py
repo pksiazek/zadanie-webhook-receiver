@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import signal
 import threading
@@ -122,3 +123,45 @@ def test_main_worker_stops_on_sigterm(env, monkeypatch):
     assert not worker.healthy
     # The auxiliary server was shut down and its socket closed.
     assert server.socket.fileno() == -1
+
+
+class CrashingWorker:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    async def run(self) -> None:
+        raise RuntimeError("worker exploded")
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+async def test_embedded_worker_crash_is_logged_immediately(
+    env, monkeypatch, caplog
+):
+    worker = CrashingWorker()
+    monkeypatch.setattr(cli, "create_worker", lambda settings, repo: worker)
+    lifespan = cli.embedded_worker_lifespan(cli.Settings())
+
+    def crash_logged() -> bool:
+        return any(
+            getattr(r, "event", "") == "embedded_worker_crashed"
+            for r in caplog.records
+        )
+
+    with caplog.at_level(logging.ERROR):
+        async with lifespan(object()):
+
+            async def wait_for_log() -> None:
+                while not crash_logged():
+                    await asyncio.sleep(0.005)
+
+            # Logged while the app is still running, not at shutdown.
+            await asyncio.wait_for(wait_for_log(), timeout=5)
+    (record,) = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", "") == "embedded_worker_crashed"
+    ]
+    assert "worker exploded" in str(record.exc_info[1])
+    assert worker.stopped

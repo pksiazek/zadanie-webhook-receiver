@@ -1,8 +1,9 @@
 """Async worker: claims due events and processes them in parallel slots.
 
 The ``worker`` package depends only on ``common`` (spec §16a). All
-SQLite calls run in threads (``asyncio.to_thread``) so the event loop
-never blocks; the connection pool hands each thread its own connection.
+SQLite calls run on a thread pool owned by the worker, so the event loop
+never blocks and no database thread outlives ``run()``; the connection
+pool hands each thread its own connection.
 """
 
 import asyncio
@@ -10,8 +11,10 @@ import logging
 import os
 import socket
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
+from concurrent.futures import ThreadPoolExecutor
 from random import Random
+from typing import Any
 
 from opentelemetry.trace import Status as SpanStatus
 from opentelemetry.trace import StatusCode
@@ -35,7 +38,10 @@ HEALTHY_TURNS = 10
 
 _log = logging.getLogger("webhook_receiver.worker")
 
-Sleep = Callable[[float], Awaitable[None]]
+# A coroutine function: the poll timer is passed to asyncio.create_task.
+Sleep = Callable[[float], Coroutine[Any, Any, None]]
+# Database threads beyond one per slot: recovery/claim and retention.
+EXTRA_DB_THREADS = 2
 
 
 def _ms(seconds: float) -> int:
@@ -69,6 +75,7 @@ class Worker:
         self._next_retention_ms: int | None = None
         self._running = False
         self._last_turn = 0.0
+        self._executor: ThreadPoolExecutor | None = None
         self._policy = RetentionPolicy(
             payload_ms=int(settings.retention_payload_days * DAY_MS),
             completed_ms=int(settings.retention_completed_days * DAY_MS),
@@ -78,6 +85,14 @@ class Worker:
 
     @property
     def healthy(self) -> bool:
+        """Liveness only: the loop is running and turned recently.
+
+        It says nothing about database health. Under SQLite lock
+        contention one call may wait up to ``busy_timeout`` (5 s), so a
+        single turn can exceed the ``10 x poll_interval`` window and
+        briefly report unhealthy; the Docker healthcheck should allow a
+        few retries before declaring the container unhealthy.
+        """
         limit = HEALTHY_TURNS * self._settings.poll_interval_seconds
         return self._running and time.monotonic() - self._last_turn < limit
 
@@ -112,7 +127,30 @@ class Worker:
         finally:
             self._running = False
             stop_wait.cancel()
-            await self._drain()
+            try:
+                await self._drain()
+            finally:
+                await self._close_executor()
+
+    async def _db[T](self, fn: Callable[..., T], *args: Any) -> T:
+        """Run a blocking repository call on the worker's own threads."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._settings.worker_concurrency
+                + EXTRA_DB_THREADS,
+                thread_name_prefix="worker-db",
+            )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, fn, *args)
+
+    async def _close_executor(self) -> None:
+        # A call cancelled after the grace period may still be running in
+        # its thread; wait for it (bounded by SQLite's busy_timeout) so
+        # the caller can safely close the connection pool. Waiting runs
+        # off the loop so it stays responsive meanwhile.
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            await asyncio.to_thread(executor.shutdown, wait=True)
 
     async def _turn(self) -> int:
         """Recover leases, claim into free slots; returns rows claimed."""
@@ -122,7 +160,7 @@ class Worker:
             free = self._settings.worker_concurrency - len(self._in_flight)
             if free <= 0:
                 return 0
-            events = await asyncio.to_thread(
+            events = await self._db(
                 self._repo.claim, free, _ms(self._settings.lease_seconds)
             )
         except Exception:
@@ -137,16 +175,11 @@ class Worker:
         return len(events)
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
+        # process() handles its own errors; nothing to report here.
         self._in_flight.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            _log.error(
-                "attempt crashed",
-                exc_info=task.exception(),
-                extra={"event": "error", "worker_id": self.worker_id},
-            )
 
     async def _recover(self) -> None:
-        result = await asyncio.to_thread(
+        result = await self._db(
             self._repo.recover_expired, self._settings.max_attempts
         )
         count = result.retried + result.failed
@@ -220,6 +253,17 @@ class Worker:
                 )
             except SimulatedFailure as exc:
                 error = str(exc)
+            except Exception as exc:
+                # Not a simulated outcome: leave the event in processing;
+                # its lease expires and it is recovered and retried.
+                span.record_exception(exc)
+                span.set_attribute("outcome", "error")
+                span.set_status(SpanStatus(StatusCode.ERROR, str(exc)))
+                _log.exception(
+                    "attempt failed unexpectedly",
+                    extra={**attrs, "event": "attempt_error"},
+                )
+                return
             duration = time.monotonic() - started
             try:
                 outcome, stored = await self._store(event, error, outcome_data)
@@ -266,7 +310,7 @@ class Worker:
                 "duration_ms": data["duration_ms"],
                 "attempt": attempt,
             }
-            stored = await asyncio.to_thread(
+            stored = await self._db(
                 self._repo.complete, event.id, attempt, result
             )
             return "success", stored
@@ -282,7 +326,7 @@ class Worker:
         else:
             retry_at = None
             outcome = "failed"
-        stored = await asyncio.to_thread(
+        stored = await self._db(
             self._repo.record_failure, event.id, attempt, error, retry_at
         )
         return outcome, stored
@@ -314,7 +358,7 @@ class Worker:
             _log.exception("retention failed", extra={"event": "retention"})
 
     async def run_retention_once(self) -> PurgeResult:
-        result = await asyncio.to_thread(self._repo.purge, self._policy)
+        result = await self._db(self._repo.purge, self._policy)
         _log.info(
             "retention finished",
             extra={

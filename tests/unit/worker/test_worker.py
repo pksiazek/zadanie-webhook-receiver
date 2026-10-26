@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from webhook_receiver.common.telemetry import (
     get_tracer,
     metrics_payload,
 )
+from webhook_receiver.worker import app as worker_app
 from webhook_receiver.worker.app import Worker, create_worker
 
 DAY_MS = 86_400_000
@@ -61,6 +63,8 @@ class RecordingRepo(EventRepository):
         super().__init__(pool, clock)
         self.purges: list[RetentionPolicy] = []
         self.claim_errors = 0
+        self.complete_delay = 0.0
+        self.complete_threads: list[threading.Thread] = []
 
     def purge(self, policy: RetentionPolicy) -> PurgeResult:
         self.purges.append(policy)
@@ -71,6 +75,11 @@ class RecordingRepo(EventRepository):
             self.claim_errors -= 1
             raise sqlite3.OperationalError("database is locked")
         return super().claim(limit, lease_ms)
+
+    def complete(self, event_id: int, attempt: int, result: dict) -> bool:
+        self.complete_threads.append(threading.current_thread())
+        time.sleep(self.complete_delay)
+        return super().complete(event_id, attempt, result)
 
 
 @dataclass
@@ -357,3 +366,56 @@ def test_create_worker_uses_host_and_pid(worker_env):
 
     worker = create_worker(worker_env.settings(), worker_env.repo)
     assert worker.worker_id == f"{socket.gethostname()}-{os.getpid()}"
+
+
+async def test_unexpected_error_is_logged_and_event_recovered(
+    worker_env, caplog, monkeypatch, span_exporter
+):
+    real_simulate = worker_app.simulate
+    calls = 0
+
+    async def flaky_simulate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+        return await real_simulate(*args, **kwargs)
+
+    monkeypatch.setattr(worker_app, "simulate", flaky_simulate)
+    worker_env.insert("evt-1", {"email": "x@y.pl"})
+    with caplog.at_level(logging.INFO):
+        async with running(worker_env.make()):
+            await until(_status_is(worker_env, "evt-1", Status.COMPLETED))
+    assert worker_env.get("evt-1").attempts == 2
+    crashed = [
+        r for r in caplog.records if getattr(r, "event", "") == "attempt_error"
+    ]
+    assert len(crashed) == 1
+    record = crashed[0]
+    assert record.idempotency_key == "evt-1"
+    assert record.attempt == 1
+    assert record.source == "shop"
+    assert "boom" in str(record.exc_info[1])
+    assert not hasattr(record, "payload")
+    first = next(
+        s
+        for s in span_exporter.get_finished_spans()
+        if s.name == "webhook.process" and s.attributes["attempt"] == 1
+    )
+    assert first.attributes["outcome"] == "error"
+    assert [e.name for e in first.events] == ["exception"]
+
+
+async def test_no_db_thread_outlives_run(worker_env):
+    # The attempt is cancelled after the grace period while its
+    # complete() call is still running in a database thread.
+    worker_env.repo.complete_delay = 0.3
+    worker_env.insert("evt-1")
+    worker = worker_env.make(shutdown_grace_seconds=0.05)
+    task = asyncio.create_task(worker.run())
+    await until(lambda: worker_env.repo.complete_threads != [])
+    worker.stop()
+    await asyncio.wait_for(task, timeout=TIMEOUT)
+    (db_thread,) = worker_env.repo.complete_threads
+    assert db_thread is not threading.main_thread()
+    assert not db_thread.is_alive()

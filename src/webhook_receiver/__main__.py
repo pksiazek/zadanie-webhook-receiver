@@ -5,6 +5,8 @@ The only module that composes the ``api`` and ``worker`` packages: in
 """
 
 import asyncio
+import contextlib
+import logging
 import signal
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -28,6 +30,18 @@ from webhook_receiver.worker.http import start_worker_http_server
 
 USAGE = "usage: python -m webhook_receiver {api|worker}"
 
+_log = logging.getLogger("webhook_receiver.main")
+
+
+def _report_crash(task: asyncio.Task[None]) -> None:
+    """Log a crashed embedded worker at once, not only at shutdown."""
+    if not task.cancelled() and task.exception() is not None:
+        _log.error(
+            "embedded worker crashed",
+            exc_info=task.exception(),
+            extra={"event": "embedded_worker_crashed"},
+        )
+
 
 def embedded_worker_lifespan(
     settings: Settings,
@@ -42,11 +56,15 @@ def embedded_worker_lifespan(
     async def lifespan(repo: EventRepository) -> AsyncIterator[None]:
         worker = create_worker(settings, repo)
         task = asyncio.create_task(worker.run())
+        task.add_done_callback(_report_crash)
         try:
             yield
         finally:
             worker.stop()
-            await task
+            # A crash was already logged by _report_crash; the API still
+            # shuts down cleanly.
+            with contextlib.suppress(Exception):
+                await task
 
     return lifespan
 
