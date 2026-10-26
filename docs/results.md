@@ -162,7 +162,9 @@ payloadu (taki stan ma tabela po tygodniu ruchu):
 - Indeks `ix_events_purgeable` zawiera tylko wiersze z payloadem, więc
   mediana porcji jest taka sama jak bez wyczyszczonych wierszy (ok. 1,8 ms),
   a pusta porcja kosztuje 0,01 ms.
-- p95 14,978 ms po poprawce to pojedyncze wolne porcje (commit z `FULL`),
-  nie przeszukiwanie — mediana i pusta porcja tego nie wykazują.
+- p95 14,978 ms po poprawce to jedna wolna porcja na przebieg (5 z 50
+  próbek), nie przeszukiwanie. Spowalnia ją automatyczny checkpoint WAL po
+  przygotowaniu danych (masowe czyszczenie 100 000 wierszy); po ręcznym
+  `PRAGMA wal_checkpoint` odstająca porcja znika.
 - Kolumna „przed” pochodzi z osobnego przebiegu (`retention --repeat 5`,
   ten sam benchmark na kodzie sprzed poprawki); nie ma jej w pliku wyników.

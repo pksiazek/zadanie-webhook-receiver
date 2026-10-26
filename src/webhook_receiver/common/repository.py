@@ -52,9 +52,9 @@ OLDEST_LEASED_SQL = (
 # payload purge matches ix_events_purgeable, which holds only rows that
 # still have a payload, so already-purged rows are never rescanned. Without
 # ANALYZE statistics the planner prefers ix_events_finished (status=?), so
-# INDEXED BY pins the choice. Batches
-# use `id IN (SELECT ... LIMIT)` because `UPDATE/DELETE ... LIMIT` needs a
-# compile-time option missing from many SQLite builds.
+# INDEXED BY pins the choice. Batches use `id IN (SELECT ... LIMIT)`
+# because `UPDATE/DELETE ... LIMIT` needs a compile-time option missing
+# from many SQLite builds.
 PURGE_PAYLOAD_SQL = (
     "UPDATE webhook_events SET payload_json = NULL, result_json = NULL"
     " WHERE id IN (SELECT id FROM webhook_events"

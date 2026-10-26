@@ -128,16 +128,20 @@ Nagłówki: `Content-Type: application/json`, **`X-Source`** (wymagany,
 więc nadawcę trzeba znać; dodatkowo służy jako etykieta w metrykach, logach
 i śladach. Nie jest częścią tożsamości zdarzenia: w wierszu zapisywane jest
 źródło pierwszego zgłoszenia, ponowienie z innego źródła to zwykły
-duplikat. Kubełki trzyma LRU ograniczone do `RATE_LIMIT_MAX_SOURCES`
-(10 000) źródeł, żeby dowolne wartości nagłówka nie powiększały pamięci
-limitera bez końca. Nie dotyczy to metryk: `webhooks_received_total` ma
-osobną serię dla każdej wartości `X-Source`, więc nieuwierzytelniony nadawca
-może dowolnie zwiększać ich liczbę (→ [TODO](../README.md#todo)).
-Konsekwencja LRU: przy ponad 10 000 aktywnych źródeł najdawniej używany
-kubełek jest usuwany, a jego źródło wraca z pełnym kubełkiem (burst) — przy
-celowym zalewie losowymi `X-Source` limit per źródło przestaje chronić.
-Limit działa w obrębie jednego procesu API (patrz
-[jeden proces uvicorn](tradeoffs.md#jeden-proces-uvicorn)).
+duplikat.
+
+- **Pamięć limitera jest ograniczona.** Kubełki trzyma LRU do
+  `RATE_LIMIT_MAX_SOURCES` (10 000) źródeł, więc dowolne wartości nagłówka
+  nie powiększają jej bez końca.
+- **Konsekwencja LRU:** przy ponad 10 000 aktywnych źródeł najdawniej
+  używany kubełek jest usuwany, a jego źródło wraca z pełnym kubełkiem
+  (burst). Przy celowym zalewie losowymi `X-Source` limit per źródło
+  przestaje chronić.
+- **Metryki nie są ograniczone.** `webhooks_received_total` ma osobną serię
+  dla każdej wartości `X-Source`, więc nieuwierzytelniony nadawca może
+  dowolnie zwiększać ich liczbę (→ [TODO](../README.md#todo)).
+- **Jeden proces:** limit działa w obrębie jednego procesu API (patrz
+  [jeden proces uvicorn](tradeoffs.md#jeden-proces-uvicorn)).
 
 ### `GET /webhooks/{idempotency_key}`
 
