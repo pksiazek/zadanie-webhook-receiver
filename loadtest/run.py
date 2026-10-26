@@ -499,7 +499,8 @@ def _scaling_inputs(
 ) -> tuple[list[tuple[str, str]], list[str]]:
     """``(label, text)`` per result plus read errors.
 
-    ``-`` reads one JSON object per line from stdin.
+    ``-`` reads one JSON object per line from stdin; such rows are
+    labelled ``stdin:<line>`` unless they carry a ``source`` field.
 
     stdin lets scripts/scaling.sh pipe the results into the container
     instead of bind-mounting the host directory (no uid or path issues).
@@ -525,23 +526,35 @@ def _scaling_inputs(
 def report_scaling(args: argparse.Namespace) -> int:
     throughputs: dict[int, float] = {}
     invalid: dict[int, str] = {}
-    results, unreadable = _scaling_inputs(args.files)
-    for path, raw in results:
+    seen: dict[int, str] = {}
+    results, errors = _scaling_inputs(args.files)
+    for label, raw in results:
         try:
             data = json.loads(raw)
             workers = int(data["workers"])
         except (ValueError, KeyError, TypeError) as exc:
-            unreadable.append(f"{path}: unreadable ({exc!r})")
+            errors.append(f"{label}: unreadable ({exc!r})")
             continue
+        # scaling.sh names the file in "source" when piping over stdin.
+        label = str(data.get("source") or label)
+        if workers in seen:
+            errors.append(
+                f"{label}: duplicate workers={workers}"
+                f" (first in {seen[workers]}), ignored"
+            )
+            continue
+        seen[workers] = label
         throughput = data.get("throughput_per_min")
         if not data.get("valid", False) or throughput is None:
-            invalid[workers] = (
-                f"{path}: measurement invalid, throughput_per_min={throughput}"
-            )
+            reason = f"{label}: measurement invalid"
+            reason += f", throughput_per_min={throughput}"
+            if data.get("error"):
+                reason += f", error: {data['error']}"
+            invalid[workers] = reason
         else:
             throughputs[workers] = float(throughput)
     text, passed = scaling_report(
-        throughputs, args.min_linearity, invalid=invalid, errors=unreadable
+        throughputs, args.min_linearity, invalid=invalid, errors=errors
     )
     print(text)
     return 0 if passed else 1

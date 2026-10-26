@@ -267,3 +267,44 @@ def test_scaling_report_missing_file(tmp_path, capsys):
     files.append(str(tmp_path / "nope.json"))
     assert run.main(["scaling-report", *files]) == 1
     assert "nope.json: unreadable" in capsys.readouterr().out
+
+
+def test_scaling_report_uses_source_field_as_label(monkeypatch, capsys):
+    rows = [
+        {
+            "source": "results/scaling-1.json",
+            "workers": 1,
+            "throughput_per_min": 340.0,
+            "valid": True,
+        },
+        {
+            "source": "results/scaling-2.json",
+            "workers": 2,
+            "throughput_per_min": None,
+            "valid": False,
+            "error": "stack up failed",
+        },
+    ]
+    text = "".join(json.dumps(row) + "\n" for row in rows)
+    monkeypatch.setattr("sys.stdin", io.StringIO(text))
+    assert run.main(["scaling-report", "-"]) == 1
+    out = capsys.readouterr().out
+    assert "results/scaling-2.json: measurement invalid" in out
+    assert "stack up failed" in out
+    assert "stdin:" not in out
+
+
+def test_scaling_report_rejects_duplicate_workers(tmp_path, capsys):
+    files = [_write(tmp_path, n, 340.0 * n) for n in (1, 2)]
+    dup = tmp_path / "again.json"
+    dup.write_text(
+        json.dumps({"workers": 2, "throughput_per_min": 1.0, "valid": True})
+    )
+    files.append(str(dup))
+    assert run.main(["scaling-report", *files]) == 1
+    out = capsys.readouterr().out
+    assert "again.json: duplicate workers=2" in out
+    assert "scaling-2.json" in out
+    # The first value is kept, not overwritten by the duplicate.
+    assert "680.0" in out
+    assert "scaling: FAIL" in out
