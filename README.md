@@ -2,15 +2,21 @@
 
 [![CI](https://github.com/pksiazek/zadanie-webhook-receiver/actions/workflows/ci.yml/badge.svg)](https://github.com/pksiazek/zadanie-webhook-receiver/actions/workflows/ci.yml)
 
-Prototyp serwisu HTTP, który przyjmuje webhooki JSON z `idempotency_key`,
-gwarantuje ich przetworzenie (także po restarcie lub awarii procesu) i
-udostępnia status każdego zdarzenia. Rozwiązanie
-[zadania rekrutacyjnego](https://gist.github.com/kaluzaaa/fcd035829013d9952f71a9a6a59a4d2f#file-gist_webhook_receiver-md).
+Prototyp serwisu HTTP, który:
 
-Python 3.14, FastAPI, SQLite (WAL) jako magazyn **i** kolejka, osobne
-procesy `api` i `worker`, OpenTelemetry (ślady do Jaegera, metryki
-Prometheus, logi JSON). Szczegóły: [konfiguracja](docs/configuration.md),
-[operacje](docs/operations.md), [wyniki](docs/results.md), [kompromisy](docs/tradeoffs.md).
+- przyjmuje webhooki JSON z `idempotency_key`,
+- gwarantuje ich przetworzenie — także po restarcie lub awarii procesu,
+- udostępnia status każdego zdarzenia.
+
+Rozwiązanie [zadania rekrutacyjnego](https://gist.github.com/kaluzaaa/fcd035829013d9952f71a9a6a59a4d2f#file-gist_webhook_receiver-md).
+
+**Stos:** Python 3.14, FastAPI, SQLite (WAL) jako magazyn **i** kolejka,
+osobne procesy `api` i `worker`, OpenTelemetry (ślady w Jaegerze, metryki
+Prometheus, logi JSON).
+
+**Szczegóły:** [konfiguracja](docs/configuration.md) ·
+[operacje](docs/operations.md) · [wyniki](docs/results.md) ·
+[kompromisy](docs/tradeoffs.md)
 
 ## Spis treści
 
@@ -32,20 +38,23 @@ Prometheus, logi JSON). Szczegóły: [konfiguracja](docs/configuration.md),
 
 | Pytanie | Odpowiedź |
 |---|---|
-| Jak uruchomić? | `docker compose up -d --build --wait` → API na `localhost:8000`, Jaeger na `localhost:16686` ([szczegóły](#uruchomienie)) |
-| Czy zdarzenie po `202` może zginąć? | Nie: `202` dopiero po `COMMIT` z `synchronous=FULL` (fsync); worker, który padnie, traci rezerwację i zdarzenie podejmuje inny |
-| Czy duplikat jest przetwarzany ponownie? | Nie: `UNIQUE(idempotency_key)`, duplikat dostaje `200` z aktualnym statusem |
-| Czy „dokładnie raz” jest prawdą? | Zapis zdarzenia i zapis wyniku — dokładnie raz; samo wykonanie — co najmniej raz ([dlaczego](#co-naprawdę-gwarantujemy-dokładnie-raz)) |
-| Skąd nagłówek `X-Source`? | Nie ma go w treści zadania — wymagamy go, bo rate limit liczony jest per nadawca; bez niego `400` |
-| Czy wytrzymuje 1000 webhooków/min? | Tak: p99 `POST` 19,3 ms przy 1000/min, 17,0 ms przy 3000/min; przetwarzanie skaluje się liniowo z liczbą workerów (99,8–99,9%) ([wyniki](#wyniki)) |
+| Jak uruchomić? | `docker compose up -d --build --wait` — API na `localhost:8000`, Jaeger na `localhost:16686` ([szczegóły](#uruchomienie)) |
+| Czy zdarzenie po `202` może zginąć? | Nie. `202` wychodzi dopiero po trwałym zapisie (`COMMIT` z `synchronous=FULL`, czyli fsync). |
+| Co, gdy worker padnie? | Jego rezerwacja wygasa i zdarzenie przejmuje inny worker. |
+| Czy duplikat jest przetwarzany ponownie? | Nie. `UNIQUE(idempotency_key)`; duplikat dostaje `200` z aktualnym statusem. |
+| Czy „dokładnie raz” jest prawdą? | Zapis zdarzenia i zapis wyniku — dokładnie raz. Samo wykonanie — co najmniej raz ([dlaczego](#co-naprawdę-gwarantujemy-dokładnie-raz)). |
+| Skąd nagłówek `X-Source`? | Nie ma go w treści zadania. Wymagamy go, bo rate limit liczony jest per nadawca. Bez niego `400`. |
+| Czy wytrzymuje 1000 webhooków/min? | Tak. p99 `POST`: 19,3 ms przy 1000/min i 17,0 ms przy 3000/min. Przetwarzanie skaluje się liniowo z liczbą workerów (99,8–99,9%) ([wyniki](#wyniki)). |
 | Gdzie są kompromisy i braki? | [Kompromisy](#kompromisy-tradeoffy) i [TODO](#todo) |
 
 ## Architektura
 
-**Osobne procesy `api` i `worker`, wspólny kod i jeden plik SQLite, który
-jest jednocześnie magazynem i kolejką.** Wiersz ze statusem `pending` *jest*
-zadaniem — zapisanym w tej samej transakcji co zdarzenie, więc nie ma
-problemu podwójnego zapisu (baza + broker).
+Osobne procesy `api` i `worker` korzystają ze wspólnego kodu i **jednego
+pliku SQLite, który jest jednocześnie magazynem i kolejką**.
+
+Wiersz ze statusem `pending` *jest* zadaniem do wykonania. Powstaje w tej
+samej transakcji co zapis zdarzenia, więc nie ma problemu podwójnego zapisu
+(baza + broker).
 
 ```mermaid
 flowchart LR
@@ -63,50 +72,76 @@ flowchart LR
     W -. "OTLP (ślady)" .-> J
 ```
 
-- **api** zapisuje zdarzenie i odpowiada `202`, nie przetwarza — rosnąca
-  kolejka nie wydłuża `POST`. **worker** (3 × 20 slotów asyncio) atomowo
-  rezerwuje należne zdarzenia, symuluje przetwarzanie (2–5 s), zapisuje
-  wynik albo planuje ponowienie z wykładniczym odstępem. Pracę dobiera od
-  razu po zwolnieniu slotu; gdy nie było nic do pobrania, sprawdza kolejkę
-  co `POLL_INTERVAL_SECONDS` (0,5 s).
-- **Ślad** przechodzi przez granicę procesów: API zapisuje W3C `traceparent`
-  w wierszu, worker tworzy z niego span `webhook.process` na każdą próbę.
+- **api** zapisuje zdarzenie i odpowiada `202`. Niczego nie przetwarza,
+  więc rosnąca kolejka nie wydłuża `POST`.
+- **worker** (3 procesy × 20 slotów asyncio):
+  - atomowo rezerwuje zdarzenia gotowe do wykonania,
+  - symuluje przetwarzanie (2–5 s),
+  - zapisuje wynik albo planuje ponowienie z wykładniczym odstępem,
+  - dobiera pracę od razu po zwolnieniu slotu; gdy nie było nic do
+    pobrania, sprawdza kolejkę co `POLL_INTERVAL_SECONDS` (0,5 s).
+- **Ślad** przechodzi przez granicę procesów. API zapisuje W3C
+  `traceparent` w wierszu zdarzenia, a worker tworzy z niego span
+  `webhook.process` dla każdej próby.
 
 ## Co naprawdę gwarantujemy („dokładnie raz”)
 
 „Dokładnie raz” rozkłada się na trzy etapy, a każdy ma inną gwarancję:
 
-| Co | Gwarancja | Mechanizm |
+| Etap | Gwarancja | Jak |
 |---|---|---|
-| Zapis zdarzenia | **dokładnie raz** | `UNIQUE(idempotency_key)`; `INSERT … ON CONFLICT DO NOTHING RETURNING` — zapis i decyzja „nowe/duplikat” w jednej transakcji `BEGIN IMMEDIATE`; `202` dopiero po `COMMIT` z `synchronous=FULL` |
-| Wykonanie przetwarzania | **co najmniej raz** | worker rezerwuje zdarzenie na `LEASE_SECONDS` (30 s); jeśli padnie, rezerwacja wygasa, inny worker ją odzyskuje (`retrying`, `last_error = "lease expired"`) i wykonuje kolejną próbę |
-| Efekt (zapis wyniku) | **dokładnie raz** | zapis warunkowy: `UPDATE … WHERE id = ? AND status = 'processing' AND attempts = ?`; każda rezerwacja zwiększa `attempts`, więc spóźniony worker z wygasłą rezerwacją ma nieaktualny numer próby — jego zapis nie trafia w żaden wiersz i jest odrzucany (log `stale_result`, metryka `webhook_stale_results_total`) |
+| Zapis zdarzenia | **dokładnie raz** | `UNIQUE(idempotency_key)`. Zapis i decyzja „nowe czy duplikat” w jednej transakcji `BEGIN IMMEDIATE`. `202` dopiero po `COMMIT` z `synchronous=FULL`. |
+| Wykonanie przetwarzania | **co najmniej raz** | Worker rezerwuje zdarzenie na `LEASE_SECONDS` (30 s). Jeśli padnie, rezerwacja wygasa, a inny worker ją odzyskuje i wykonuje kolejną próbę. |
+| Zapis wyniku | **dokładnie raz** | Kontrola numeru próby — wynik spóźnionego workera jest odrzucany (niżej). |
+
+**Kontrola numeru próby.** Każda rezerwacja zwiększa `attempts`. Wynik
+zapisywany jest warunkowo:
+
+```sql
+UPDATE … WHERE id = ? AND status = 'processing' AND attempts = ?
+```
+
+Worker, którego rezerwacja wygasła, ma nieaktualny numer próby. Jego zapis
+nie trafia w żaden wiersz i jest odrzucany — widać to w logu
+(`stale_result`) i w metryce `webhook_stale_results_total`.
 
 **Restart lub awaria API:**
 
-- **między `COMMIT` a wysłaniem `202`** — klient nie dostaje odpowiedzi i
-  ponawia; ponowienie trafia na istniejący klucz i dostaje `200` z aktualnym
-  statusem. Zdarzenie nie ginie i nie jest przetwarzane dwa razy;
-- **przed `COMMIT`** — nic nie zostało zapisane, ponowienie zapisuje
+- **Między `COMMIT` a wysłaniem `202`:** klient nie dostaje odpowiedzi i
+  ponawia. Ponowienie trafia na istniejący klucz i dostaje `200` z
+  aktualnym statusem. Zdarzenie nie ginie i nie jest przetwarzane dwa razy.
+- **Przed `COMMIT`:** nic nie zostało zapisane. Ponowienie zapisuje
   zdarzenie jako nowe (`202`).
 
-**Założenie:** prawdziwy efekt uboczny (zamiast symulacji) musiałby być
-idempotentny względem `idempotency_key` — wykonanie może się powtórzyć, gdy
-worker padnie po wykonaniu, a przed zapisem wyniku.
+**Restart lub awaria workera:**
 
-**Restart lub awaria workera:** zdarzenia w `processing` czekają na
-wygaśnięcie rezerwacji (do 30 s), potem są odzyskiwane. Łagodne zamykanie
-(SIGTERM) przestaje pobierać pracę i czeka na trwające próby do
-`SHUTDOWN_GRACE_SECONDS` (10 s); `stop_grace_period: 20s` w compose
-pilnuje, żeby Docker nie zabił workera wcześniej.
+- **Awaria:** zdarzenia w `processing` czekają, aż wygaśnie rezerwacja (do
+  30 s). Potem przejmuje je inny worker (`retrying`,
+  `last_error = "lease expired"`).
+- **Łagodne zamykanie (SIGTERM):** worker przestaje pobierać pracę i czeka
+  na trwające próby do `SHUTDOWN_GRACE_SECONDS` (10 s).
+- `stop_grace_period: 20s` w compose pilnuje, żeby Docker nie zabił
+  workera wcześniej.
 
-Szczegóły i granica ochrony przed duplikatami (retencja) →
-[docs/tradeoffs.md](docs/tradeoffs.md#gwarancje-założenia-i-restart-workera);
-demo awarii workera i restartu API → [docs/operations.md](docs/operations.md#awaria-workera-i-restart-api).
+**Co to znaczy dla prawdziwego przetwarzania.** Tutaj przetwarzanie to
+tylko symulacja (`sleep`). W prawdziwym systemie byłaby to akcja na
+zewnątrz, np. wysłanie maila albo obciążenie karty.
+
+Jeśli worker padnie **po** wykonaniu takiej akcji, ale **przed** zapisaniem
+wyniku, inny worker wykona ją jeszcze raz. Dlatego ta akcja musi być
+bezpieczna do powtórzenia. Najprościej: przekazywać `idempotency_key` do
+zewnętrznego systemu, żeby rozpoznał powtórkę i ją pominął.
+
+**Więcej:**
+
+- szczegóły i granica ochrony przed duplikatami (retencja) →
+  [docs/tradeoffs.md](docs/tradeoffs.md#gwarancje-założenia-i-restart-workera)
+- demo awarii workera i restartu API →
+  [docs/operations.md](docs/operations.md#awaria-workera-i-restart-api)
 
 ## Uruchomienie
 
-**Docker** (dowolny host z Docker Engine i Compose v2; obraz amd64/arm64):
+**Docker** — dowolny host z Docker Engine i Compose v2 (obraz amd64/arm64):
 
 ```bash
 docker compose up -d --build --wait           # api + 3 workery + Jaeger
@@ -115,9 +150,12 @@ docker compose up -d --wait --scale worker=5  # więcej workerów
 docker compose down                           # dane zostają; down -v usuwa też dane
 ```
 
-API: `localhost:8000`, Jaeger UI: `localhost:16686`. Porty →
-[docs/configuration.md](docs/configuration.md#docker-wymagania-i-porty); pętla restartów przy błędzie
-konfiguracji → [docs/operations.md](docs/operations.md#pętla-restartów-przy-błędzie-konfiguracji).
+- API: `localhost:8000`
+- Jaeger UI: `localhost:16686`
+- porty i wymagania →
+  [docs/configuration.md](docs/configuration.md#docker-wymagania-i-porty)
+- pętla restartów przy błędzie konfiguracji →
+  [docs/operations.md](docs/operations.md#pętla-restartów-przy-błędzie-konfiguracji)
 
 ### Testy
 
@@ -127,13 +165,15 @@ uv run ruff check . && uv run ruff format --check .   # jak w CI
 uv run pytest            # unit + integration, próg pokrycia 85%
 ```
 
-Test obciążeniowy i benchmarki → [docs/operations.md](docs/operations.md#testy-test-obciążeniowy-benchmarki).
+Test obciążeniowy i benchmarki →
+[docs/operations.md](docs/operations.md#testy-test-obciążeniowy-benchmarki).
 
 ## Przykłady: webhooki z treści zadania
 
-Pięć przykładowych webhooków z treści zadania, dosłownie. Nagłówek
-`X-Source` nie występuje w treści zadania — wymagamy go, bo rate limit
-liczony jest per nadawca; bez niego `400`.
+Pięć webhooków z treści zadania, przepisanych dosłownie.
+
+> Nagłówek `X-Source` nie występuje w treści zadania. Wymagamy go, bo rate
+> limit liczony jest per nadawca — bez niego `400`.
 
 ```bash
 H='Content-Type: application/json'
@@ -162,12 +202,19 @@ curl -s -X POST localhost:8000/webhooks -H "$H" -H 'X-Source: payments' -d '{
   "payload": {"order_id": "ORD-2024-5678", "reason": "insufficient_funds"}}'
 ```
 
-Każde zwraca `202` z nagłówkiem `Location`
-(`{"idempotency_key":"evt-001","status":"pending","status_url":"/webhooks/evt-001"}`);
-po 2–5 s `GET` pokazuje `"status":"completed"` z wynikiem. **Duplikat** — ten
-sam klucz (treść nie jest porównywana): `200`, aktualny status pierwotnego
-zdarzenia i `"duplicate": true`; nic nie jest zapisywane ani przetwarzane
-ponownie.
+Każde żądanie zwraca `202` z nagłówkiem `Location`:
+
+```json
+{"idempotency_key":"evt-001","status":"pending","status_url":"/webhooks/evt-001"}
+```
+
+Po 2–5 s `GET` pokazuje `"status":"completed"` i wynik.
+
+**Duplikat** — ten sam klucz (treść nie jest porównywana):
+
+- odpowiedź `200` z aktualnym statusem pierwotnego zdarzenia i
+  `"duplicate": true`,
+- nic nie jest zapisywane ani przetwarzane ponownie.
 
 ```bash
 curl -s localhost:8000/webhooks/evt-001
@@ -181,32 +228,58 @@ Ponowienia (`payload.simulate`: `fail_once`, `fail_always`) i rate limiting →
 
 ## API
 
-`POST /webhooks` z nagłówkiem `X-Source` (1–64 znaki) i body
-`{"idempotency_key", "event_type", "payload"}`; klucz: niepusty string do
-255 znaków, globalnie unikalny. `GET /webhooks/{idempotency_key}` (klucz
-kodowany procentowo, np. `evt%2F1`) zwraca status; nieznany klucz → `404`.
+**`POST /webhooks`**
+
+- nagłówek `X-Source` (1–64 znaki),
+- body `{"idempotency_key", "event_type", "payload"}`,
+- `idempotency_key`: niepusty string do 255 znaków, globalnie unikalny.
+
+**`GET /webhooks/{idempotency_key}`** zwraca status zdarzenia.
+
+- klucz kodowany procentowo, np. `evt%2F1`,
+- nieznany klucz → `404`.
+
+### Kody odpowiedzi `POST`
 
 | Sytuacja | Kod | Uwagi |
 |---|---|---|
-| nowe zdarzenie, zapisane trwale | `202` | `{idempotency_key, status: "pending", status_url}` + nagłówek `Location` (klucz zakodowany procentowo) |
-| duplikat (ten sam klucz, dowolna treść) | `200` | aktualny status jak w `GET` + `"duplicate": true`; także przy przekroczonym progu zaległości |
-| body > 256 KiB | `413` | odrzucane przez middleware przed jakąkolwiek inną pracą; **nie jest liczone** w `webhooks_received_total` |
+| nowe zdarzenie, zapisane trwale | `202` | `{idempotency_key, status: "pending", status_url}` + nagłówek `Location` |
+| duplikat (ten sam klucz, dowolna treść) | `200` | aktualny status jak w `GET` + `"duplicate": true` |
+| body > 256 KiB | `413` | odrzucane przed jakąkolwiek inną pracą |
 | brak lub zbyt długi `X-Source` | `400` | |
 | niepoprawne body | `422` | lista błędów bez treści zgłoszenia |
 | przekroczony limit nadawcy | `429` + `Retry-After` | duplikaty też zużywają limit |
-| przekroczony próg zaległości (`pending`+`retrying` ≥ `MAX_BACKLOG`, domyślnie 100 000) | `503` + `Retry-After` | tylko nowe zdarzenia; duplikat dostaje `200` — nie dodaje pracy, a nadawca w pętli ponowień nie pogłębia zalewu |
-| chwilowa rywalizacja o zapis w SQLite (`SQLITE_BUSY`/`SQLITE_LOCKED` po `busy_timeout` 5 s) | `503` + `Retry-After` | także duplikat — jego status nie jest wtedy znany; bez treści błędu bazy |
+| za duża zaległość (`pending`+`retrying` ≥ `MAX_BACKLOG`, domyślnie 100 000) | `503` + `Retry-After` | tylko nowe zdarzenia |
+| chwilowa blokada SQLite (`SQLITE_BUSY` / `SQLITE_LOCKED` po `busy_timeout` 5 s) | `503` + `Retry-After` | także duplikat |
 | inny błąd bazy (I/O, uszkodzony plik) | `500` | |
 
-**Kolejność kontroli:** `413` (rozmiar) → `400` (`X-Source`) → `422`
-(walidacja body) → `429` (rate limit) → `503` (backpressure; najpierw
-sprawdzenie, czy to duplikat) → zapis zdarzenia (`202` / `200`; przy
-rywalizacji o blokadę `503`).
+Uwagi do tabeli:
 
-**Rate limiting:** token bucket per `X-Source` w pamięci procesu API (50
-żądań/s, burst 100), kubełki w LRU do 10 000 źródeł; limit działa w obrębie
-jednego procesu API. Szczegóły, `Retry-After`, pola odpowiedzi `GET` i
-endpointy operacyjne → [docs/operations.md](docs/operations.md#api--szczegóły).
+- `Location` zawiera klucz zakodowany procentowo.
+- `413` **nie jest liczone** w `webhooks_received_total`.
+- Przy za dużej zaległości duplikat nadal dostaje `200`: nie dodaje pracy,
+  a nadawca ponawiający w pętli nie pogłębia zalewu.
+- Przy blokadzie SQLite duplikat dostaje `503`, bo jego status nie jest
+  wtedy znany. Odpowiedź nie zawiera treści błędu bazy.
+
+### Kolejność kontroli
+
+1. `413` — rozmiar body
+2. `400` — `X-Source`
+3. `422` — walidacja body
+4. `429` — rate limit
+5. `503` — backpressure (najpierw sprawdzenie, czy to duplikat)
+6. zapis zdarzenia → `202` albo `200` (przy blokadzie SQLite `503`)
+
+### Rate limiting
+
+- token bucket per `X-Source`, w pamięci procesu API,
+- 50 żądań/s, burst 100,
+- kubełki w LRU do 10 000 źródeł,
+- limit działa w obrębie jednego procesu API.
+
+Szczegóły, `Retry-After`, pola odpowiedzi `GET` i endpointy operacyjne →
+[docs/operations.md](docs/operations.md#api--szczegóły).
 
 ## Statusy zdarzenia
 
@@ -222,29 +295,40 @@ stateDiagram-v2
     failed --> [*]
 ```
 
-Przejścia z dokładnymi warunkami → [docs/operations.md](docs/operations.md#przejścia-statusów).
+Przejścia z dokładnymi warunkami →
+[docs/operations.md](docs/operations.md#przejścia-statusów).
 
 ## Obserwowalność
 
-- **Metryki** na `/metrics` API: `webhooks_received_total{source,outcome}`,
-  `webhook_queue_depth{status}`, `webhook_queue_oldest_pending_age_seconds`
-  (sygnał „nikt nie przetwarza”); metryki przetwarzania na `/metrics`
-  workera (port 9100 w sieci compose).
+- **Metryki API** (`/metrics`):
+  - `webhooks_received_total{source,outcome}`,
+  - `webhook_queue_depth{status}`,
+  - `webhook_queue_oldest_pending_age_seconds` — sygnał „nikt nie
+    przetwarza”.
+- **Metryki workera:** `/metrics` na porcie 9100 (w sieci compose).
 - **Ślady** w Jaegerze (`localhost:16686`): `POST /webhooks` i
-  `webhook.process` na każdą próbę w jednym śladzie. **Logi** JSON na
-  stdout z `trace_id`, `idempotency_key`, `source` (nigdy payload).
+  `webhook.process` dla każdej próby — w jednym śladzie.
+- **Logi** JSON na stdout, z `trace_id`, `idempotency_key` i `source`
+  (nigdy payload).
 - **Ile workerów działa:** `docker compose ps worker` (kontenery
-  `(healthy)`); pod obciążeniem `webhook_queue_depth{status="processing"}`
+  `(healthy)`). Pod obciążeniem `webhook_queue_depth{status="processing"}`
   ≈ N × 20.
 
-Tabele metryk, ślad z `traceparent`, logi, liczba workerów →
-[docs/operations.md](docs/operations.md#obserwowalność); zapytania `sqlite3` (lista `failed`,
-zaległe, kopia bazy) → [docs/operations.md](docs/operations.md#sqlite-dla-operatora).
+**Więcej:**
+
+- tabele metryk, ślad z `traceparent`, logi, liczba workerów →
+  [docs/operations.md](docs/operations.md#obserwowalność)
+- zapytania `sqlite3` (lista `failed`, zaległe, kopia bazy) →
+  [docs/operations.md](docs/operations.md#sqlite-dla-operatora)
 
 ## Wyniki
 
-Sprzęt: Apple Silicon, 10 rdzeni, Linux VM OrbStack na macOS, devcontainer z docker-in-docker, wolumen btrfs.
+**Sprzęt:** Apple Silicon, 10 rdzeni, Linux VM OrbStack na macOS,
+devcontainer z docker-in-docker, wolumen btrfs.
+
 Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md).
+
+### Test obciążeniowy
 
 | Scenariusz | Ruch | p99 `POST` | Wynik |
 |---|---|---|---|
@@ -252,90 +336,120 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 | `burst` (3 workery) | 3000/min przez 2 min, potem 100/min, potem 0 | 17,0 ms w fazie 3000/min | kolejka do 3904, do zera w t = 381 s (limit 900 s), 6416/6416 `completed`; **PASS** |
 | `scaling` N = 1 / 2 / 3 | zalana kolejka, pomiar przez 120 s | 17,2 / 18,4 / 21,0 ms | 342,3 / 683,0 / 1025,8 zdarzeń/min, liniowość 100 / 99,8 / 99,9%; **PASS** |
 
-Benchmarki SQLite ([`results/benchmarks.txt`](results/benchmarks.txt)):
-- **`synchronous=FULL` ≈ 2 ms na zapis przy 100 tx/s** (mediana 2,059 ms;
-  0,419 ms bez przerw), `NORMAL` 0,206 ms; liczby `FULL` mogą być
-  optymistyczne (fsync w maszynie wirtualnej na macOS).
-- **Rezerwacja nie zależy od długości kolejki** do 100 000: samo zapytanie
-  ok. 0,05 ms, reszta to commit.
-- **Pułap zapisu ok. 2200–2300 tx/s łącznie niezależnie od liczby procesów**
-  (jeden pisarz); blokada nie jest sprawiedliwa — przy nasyceniu część
-  procesów czeka pełny `busy_timeout` i dostaje `SQLITE_BUSY`. Test
-  obciążeniowy to ≤ ~50 tx/s, ok. 2% pułapu (szacunek) — stąd liniowość.
-- **Porcja retencji 1000 wierszy trzyma blokadę ok. 2 ms.**
+### Benchmarki SQLite
+
+Źródło: [`results/benchmarks.txt`](results/benchmarks.txt).
+
+- **`synchronous=FULL` kosztuje ok. 2 ms na zapis przy 100 tx/s**
+  (mediana 2,059 ms; bez przerw 0,419 ms). `NORMAL`: 0,206 ms.
+  Liczby `FULL` mogą być optymistyczne (fsync w maszynie wirtualnej na
+  macOS).
+- **Rezerwacja nie zależy od długości kolejki** (do 100 000). Samo
+  zapytanie trwa ok. 0,05 ms, reszta to commit.
+- **Pułap zapisu: ok. 2200–2300 tx/s łącznie**, niezależnie od liczby
+  procesów (SQLite ma jednego pisarza naraz).
+- **Blokada zapisu nie jest sprawiedliwa.** Przy nasyceniu część procesów
+  czeka pełny `busy_timeout` i dostaje `SQLITE_BUSY`.
+- **Test obciążeniowy zużywał ≤ ~50 tx/s, ok. 2% pułapu** (szacunek) —
+  stąd liniowe skalowanie.
+- **Porcja retencji (1000 wierszy) trzyma blokadę ok. 2 ms.**
 
 ## Założenia skalowalności
 
-- **1000/min ≈ 17/s**; przy średnio 3,5 s przetwarzania potrzeba ~60 slotów
-  → 3 workery × 20 (≈ 1030/min, zmierzone 1025,8/min); więcej przez
-  `--scale worker=N`, skalowanie liniowe do N = 3 (99,9%).
+- **Workery:** 1000/min ≈ 17/s. Przy średnio 3,5 s przetwarzania potrzeba
+  ~60 slotów, czyli 3 workery × 20 (≈ 1030/min; zmierzone 1025,8/min).
+  Więcej przez `--scale worker=N`; skalowanie liniowe do N = 3 (99,9%).
 - **Zapis do SQLite:** jeden pisarz, pułap ok. 2200–2300 tx/s przy
-  nasyceniu wobec ≤ ~50 tx/s (szacunek) przy docelowym ruchu; przy
+  nasyceniu, wobec ≤ ~50 tx/s (szacunek) przy docelowym ruchu. Przy
   wielokrotnie większym ruchu wąskim gardłem stanie się blokada zapisu.
 - **Przyjmowanie:** jeden proces API, p99 `POST` ≤ 21 ms do 3000/min.
-- **Granica: jeden host.** Dalej: PostgreSQL (`SELECT … FOR UPDATE SKIP
-  LOCKED`) albo broker z outboxem, współdzielony rate limiter (→ [TODO](#todo)).
+- **Granica: jeden host.** Dalej: PostgreSQL
+  (`SELECT … FOR UPDATE SKIP LOCKED`) albo broker z outboxem, współdzielony
+  rate limiter (→ [TODO](#todo)).
 
 ## Kompromisy (tradeoffy)
 
-- **Readiness API niezależne od workera:** `/ready` sprawdza bazę i schemat,
-  więc jest zielone przy martwych workerach (przyjmowanie nie zależy od
-  przetwarzania). Problem widać w `docker compose ps` i po rosnącym
-  `webhook_queue_oldest_pending_age_seconds`; przy pustej kolejce bezczynny
-  worker jest nieodróżnialny od martwego. [Więcej](docs/tradeoffs.md#readiness-api-niezależne-od-workera)
-- **`synchronous=FULL`, nie `NORMAL`:** `202` obiecuje trwałość, a `NORMAL`
-  może zgubić ostatnie commity przy zaniku zasilania; koszt ok. 2 ms na
-  zapis. [Więcej](docs/tradeoffs.md#synchronousfull-zamiast-normal)
-- **Schemat:** jedna tabela `STRICT`, `id` (alias `rowid`) obok `UNIQUE`
-  klucza, czasy INTEGER ms, `run_at` zamiast dwóch terminów, indeksy
-  częściowe pod zapytania, kontrola numeru próby. [Więcej](docs/tradeoffs.md#schemat)
-- **SQLite współdzielony przez kontenery:** działa dzięki wspólnemu jądru
-  (blokady `fcntl`, `-shm` przez `mmap`); tylko jeden host, bez NFS, nazwany
-  wolumen, ten sam UID, jeden pisarz naraz. [Więcej](docs/tradeoffs.md#sqlite-współdzielony-przez-kilka-kontenerów)
-- **Co najmniej raz z efektem dokładnie raz:** po awarii workera symulacja
-  może się powtórzyć, a zdarzenie czeka do 30 s na odzyskanie rezerwacji.
+Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
+
+- **Readiness API niezależne od workera.**
+  `/ready` sprawdza bazę i schemat, więc jest zielone przy martwych
+  workerach — przyjmowanie nie zależy od przetwarzania. Problem widać w
+  `docker compose ps` i po rosnącym
+  `webhook_queue_oldest_pending_age_seconds`. Przy pustej kolejce
+  bezczynny worker jest nieodróżnialny od martwego.
+  [Więcej](docs/tradeoffs.md#readiness-api-niezależne-od-workera)
+- **`synchronous=FULL`, nie `NORMAL`.**
+  `202` obiecuje trwałość, a `NORMAL` może zgubić ostatnie commity przy
+  zaniku zasilania. Koszt: ok. 2 ms na zapis.
+  [Więcej](docs/tradeoffs.md#synchronousfull-zamiast-normal)
+- **Schemat.**
+  Jedna tabela `STRICT`; `id` (alias `rowid`) obok `UNIQUE` klucza; czasy
+  jako INTEGER ms; `run_at` zamiast dwóch terminów; indeksy częściowe pod
+  zapytania; kontrola numeru próby.
+  [Więcej](docs/tradeoffs.md#schemat)
+- **SQLite współdzielony przez kontenery.**
+  Działa dzięki wspólnemu jądru (blokady `fcntl`, `-shm` przez `mmap`).
+  Warunki: jeden host, bez NFS, nazwany wolumen, ten sam UID, jeden pisarz
+  naraz.
+  [Więcej](docs/tradeoffs.md#sqlite-współdzielony-przez-kilka-kontenerów)
+- **Co najmniej raz z efektem dokładnie raz.**
+  Po awarii workera symulacja może się powtórzyć, a zdarzenie czeka do
+  30 s na odzyskanie rezerwacji.
   [Więcej](docs/tradeoffs.md#semantyka-co-najmniej-raz-z-efektem-dokładnie-raz)
-- **Retencja w dwóch progach (GDPR):** payload `completed` czyszczony po 7
-  dniach, wiersze usuwane po 30; okno retencji klucza = okno ochrony przed
-  duplikatami; plik bazy nie maleje. [Więcej](docs/tradeoffs.md#retencja-dwa-progi-gdpr-plik-nie-maleje)
-- **Payload zdarzeń `failed` (możliwe dane osobowe) zostaje 30 dni** do
-  diagnozy — dłużej niż 7 dni dla `completed`; skraca to
-  `RETENTION_FAILED_DAYS`. [Więcej](docs/tradeoffs.md#retencja-dwa-progi-gdpr-plik-nie-maleje)
-- **Jeden proces uvicorn:** rate limiter i cache statystyk kolejki są w
-  pamięci procesu. [Więcej](docs/tradeoffs.md#jeden-proces-uvicorn)
-- **Duplikat bez porównania treści** (dosłownie według zadania): inny
-  webhook z tym samym kluczem przepada bez sygnału. [Więcej](docs/tradeoffs.md#duplikat-bez-porównania-treści)
-- **Klucze `.` i `..`** są przyjmowane, ale `GET` przez ścieżkę ich nie
-  odpyta (normalizacja segmentów). [Więcej](docs/tradeoffs.md#klucze--i-)
+- **Retencja w dwóch progach (GDPR).**
+  Payload `completed` czyszczony po 7 dniach, wiersze usuwane po 30.
+  Okno retencji klucza = okno ochrony przed duplikatami. Plik bazy nie
+  maleje.
+  [Więcej](docs/tradeoffs.md#retencja-dwa-progi-gdpr-plik-nie-maleje)
+- **Payload zdarzeń `failed` zostaje 30 dni.**
+  Może zawierać dane osobowe, ale jest potrzebny do diagnozy — dłużej niż
+  7 dni dla `completed`. Skraca to `RETENTION_FAILED_DAYS`.
+  [Więcej](docs/tradeoffs.md#retencja-dwa-progi-gdpr-plik-nie-maleje)
+- **Jeden proces uvicorn.**
+  Rate limiter i cache statystyk kolejki są w pamięci procesu.
+  [Więcej](docs/tradeoffs.md#jeden-proces-uvicorn)
+- **Duplikat bez porównania treści** (dosłownie według zadania).
+  Inny webhook z tym samym kluczem przepada bez sygnału.
+  [Więcej](docs/tradeoffs.md#duplikat-bez-porównania-treści)
+- **Klucze `.` i `..`.**
+  Są przyjmowane, ale `GET` przez ścieżkę ich nie odpyta (normalizacja
+  segmentów).
+  [Więcej](docs/tradeoffs.md#klucze--i-)
 
 ## TODO
 
-- **Doprecyzować z nadawcami format `idempotency_key`** (zestaw znaków,
-  długość, struktura) i wybrać rozwiązanie: obecne (dowolny string +
-  kodowanie procentowe), ograniczony zestaw znaków albo klucz poza ścieżką
-  (parametr zapytania / wewnętrzny identyfikator); rozwiązuje też `.`/`..`.
-- Uwierzytelnianie nadawców: podpisy HMAC (zamiast zaufania do `X-Source`).
-- Współdzielony rate limit (np. Redis) i cache statystyk — poziome
-  skalowanie API (wiele procesów uvicorn / instancji).
-- PostgreSQL (`SELECT … FOR UPDATE SKIP LOCKED`) albo broker z outboxem —
-  wyjście poza jeden host i jednego pisarza SQLite.
-- OpenTelemetry Collector w compose (zbiorczy endpoint Prometheus, metryka
-  `webhook_worker_up` per `service.instance.id` = liczba workerów) i pełny
-  stos Prometheus/Grafana/Tempo z dashboardami.
-- Alerty (`webhook_queue_oldest_pending_age_seconds`, przyrost `failed`,
-  `db_busy`) i dead-letter dla `failed`.
-- Endpointy operatora: ręczne ponowienie `failed`, lista `failed` i
+- **Format `idempotency_key`:** doprecyzować z nadawcami (zestaw znaków,
+  długość, struktura) i wybrać rozwiązanie:
+  - obecne (dowolny string + kodowanie procentowe),
+  - ograniczony zestaw znaków,
+  - klucz poza ścieżką (parametr zapytania / wewnętrzny identyfikator).
+
+  To rozwiązuje też problem kluczy `.` i `..`.
+- **Uwierzytelnianie nadawców:** podpisy HMAC zamiast zaufania do
+  `X-Source`.
+- **Poziome skalowanie API:** współdzielony rate limit (np. Redis) i cache
+  statystyk — wiele procesów uvicorn / instancji.
+- **Wyjście poza jeden host i jednego pisarza SQLite:** PostgreSQL
+  (`SELECT … FOR UPDATE SKIP LOCKED`) albo broker z outboxem.
+- **OpenTelemetry Collector w compose:** zbiorczy endpoint Prometheus,
+  metryka `webhook_worker_up` per `service.instance.id` (= liczba
+  workerów), pełny stos Prometheus/Grafana/Tempo z dashboardami.
+- **Alerty** (`webhook_queue_oldest_pending_age_seconds`, przyrost
+  `failed`, `db_busy`) i dead-letter dla `failed`.
+- **Endpointy operatora:** ręczne ponowienie `failed`, lista `failed` i
   zaległych (zamiast zapytań `sqlite3`).
-- Wykrywanie niezgodności treści przy ponowieniu z tym samym kluczem (hash
-  payloadu + `409` albo metryka).
-- Osobny próg czyszczenia payloadu (albo maskowanie) dla zdarzeń `failed`.
-- `PRAGMA auto_vacuum=INCREMENTAL` + okresowe `incremental_vacuum`.
-- Narzędzie migracji schematu (dziś `CREATE … IF NOT EXISTS` przy starcie).
-- Uwzględniać `OTEL_SERVICE_NAME` (dziś nazwa usługi jest w kodzie).
-- Liczyć odrzucenia `413` w metrykach; osobna metryka awarii wbudowanego
+- **Niezgodność treści przy ponowieniu z tym samym kluczem:** hash
+  payloadu + `409` albo metryka.
+- **Osobny próg czyszczenia payloadu** (albo maskowanie) dla zdarzeń
+  `failed`.
+- **`PRAGMA auto_vacuum=INCREMENTAL`** + okresowe `incremental_vacuum`.
+- **Migracje schematu** (dziś `CREATE … IF NOT EXISTS` przy starcie).
+- **`OTEL_SERVICE_NAME`:** uwzględniać zmienną (dziś nazwa usługi jest w
+  kodzie).
+- **Metryki:** liczyć odrzucenia `413`; osobna metryka awarii wbudowanego
   workera (`EMBEDDED_WORKER`; dziś tylko log).
-- Pomiar użytecznego pułapu zapisu przy p99 < 100 ms i pomiary na serwerze
-  z Linuksem bez warstwy wirtualizacji macOS.
+- **Pomiary:** użyteczny pułap zapisu przy p99 < 100 ms; pomiary na
+  serwerze z Linuksem, bez warstwy wirtualizacji macOS.
 
 ## Struktura repozytorium i dokumenty
 
@@ -353,8 +467,9 @@ results/        wyniki testu obciążeniowego i benchmarków
 docs/           configuration.md, operations.md, results.md, tradeoffs.md, superpowers/specs/
 ```
 
-`api` i `worker` importują tylko z `common` (pilnuje tego test
-architektury); jeden obraz Dockera, dwie komendy, użytkownik inny niż root.
-Pełne uzasadnienia decyzji:
-[dokument projektowy](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md)
-i [zapis brainstormingu](docs/superpowers/specs/2026-10-25-webhook-receiver-brainstorming.md).
+- `api` i `worker` importują tylko z `common` (pilnuje tego test
+  architektury).
+- Jeden obraz Dockera, dwie komendy, użytkownik inny niż root.
+- Pełne uzasadnienia decyzji:
+  [dokument projektowy](docs/superpowers/specs/2026-10-25-webhook-receiver-design.md)
+  i [zapis brainstormingu](docs/superpowers/specs/2026-10-25-webhook-receiver-brainstorming.md).
