@@ -2,9 +2,6 @@
 # One image, two commands: `api` (default) and `worker`.
 FROM python:3.14-slim-trixie
 
-# uv pinned to the same version as the devcontainer (post-create.sh).
-COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
-
 WORKDIR /app
 # Use the interpreter from the base image; never download one.
 ENV UV_LINK_MODE=copy \
@@ -14,16 +11,21 @@ ENV UV_LINK_MODE=copy \
 # Dependencies in their own layer: rebuilt only when the lock changes.
 # No extras -> no dev/loadtest packages in the runtime image.
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
+# uv (same version as the devcontainer, post-create.sh) is bind-mounted
+# only for the sync steps, so it is not part of the final image.
+RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
 COPY src/ src/
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
 # Non-root user; /data is owned by it so an empty named volume mounted
 # there inherits that owner on first use.
-RUN useradd --system --uid 10001 --user-group --no-create-home app \
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --no-create-home app \
     && mkdir -p /data \
     && chown app:app /data
 
@@ -34,6 +36,7 @@ ENV DB_PATH=/data/webhooks.db \
 USER app
 EXPOSE 8000 9100
 
-# Exec form: python is PID 1 and receives SIGTERM directly.
+# Exec form: python gets SIGTERM directly (as PID 1, or as the child of
+# the init process that compose adds with `init: true`).
 ENTRYPOINT ["python", "-m", "webhook_receiver"]
 CMD ["api"]

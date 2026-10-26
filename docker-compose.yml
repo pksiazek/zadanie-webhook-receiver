@@ -12,13 +12,16 @@ services:
     build: .
     image: webhook-receiver:local
     command: ["api"]
+    # tini as PID 1: forwards SIGTERM even before the app installs
+    # its own handlers, and reaps zombies.
+    init: true
+    restart: unless-stopped
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
       - webhook-data:/data
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
-      OTEL_SERVICE_NAME: webhook-api
     depends_on:
       jaeger:
         condition: service_started
@@ -36,6 +39,8 @@ services:
   worker:
     image: webhook-receiver:local
     command: ["worker"]
+    init: true
+    restart: unless-stopped
     deploy:
       replicas: 3
     volumes:
@@ -43,7 +48,6 @@ services:
     environment:
       WORKER_CONCURRENCY: "20"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
-      OTEL_SERVICE_NAME: webhook-worker
     # The API creates the schema at startup; workers start after it.
     depends_on:
       api:
