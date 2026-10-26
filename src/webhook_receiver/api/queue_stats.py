@@ -45,9 +45,15 @@ class QueueStatsCache:
             _log.warning("queue stats refresh failed", exc_info=True)
 
     def start(self) -> None:
+        """Refresh once synchronously, then keep refreshing in a thread.
+
+        The synchronous refresh means backpressure sees the real backlog
+        from the first request after startup, not the zero placeholder.
+        """
         if self._thread is not None:
             raise RuntimeError("QueueStatsCache already started")
         self._stop.clear()
+        self.refresh()
         self._thread = threading.Thread(
             target=self._run, name="queue-stats-cache", daemon=True
         )
@@ -59,6 +65,5 @@ class QueueStatsCache:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.wait(self._refresh_seconds):
             self.refresh()
-            self._stop.wait(self._refresh_seconds)

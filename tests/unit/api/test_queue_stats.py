@@ -106,3 +106,27 @@ def test_second_start_raises(repo):
         cache.stop()
     with pytest.raises(RuntimeError):
         cache.start()
+
+
+def test_start_refreshes_before_returning(repo, monkeypatch):
+    # Backpressure must see the real backlog from the first request
+    # after startup, not the zero placeholder.
+    stats = QueueStats(
+        pending=4, retrying=0, processing=0, oldest_due_age_ms=0
+    )
+    callers: list[threading.Thread] = []
+
+    def counted():
+        callers.append(threading.current_thread())
+        return stats
+
+    monkeypatch.setattr(repo, "queue_stats", counted)
+    cache = QueueStatsCache(repo, 3600)
+    cache.start()
+    try:
+        assert cache.get() == stats
+    finally:
+        cache.stop()
+    # Refreshed synchronously by start(); the background thread waits
+    # one interval before its own first refresh.
+    assert callers == [threading.current_thread()]
