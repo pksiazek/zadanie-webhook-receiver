@@ -1,26 +1,26 @@
 SQLite 3.46.1, Python 3.14.9, repeat 5, dir /data/bench
 benchmark   case                                     n  median     p95  unit  notes
-----------  ------------------------------------  ----  ------  ------  ----  -----------------------------------------------------------------------------------------------------------------
-sync        FULL insert_or_get, flat out          5000   0.419   0.631  ms    p99 0.884 ms; 2171 tx/s serial
-sync        FULL insert_or_get, paced 100 tx/s    5000   2.058   2.942  ms    p99 5.496 ms
-sync        NORMAL insert_or_get, flat out        5000   0.025   0.063  ms    p99 0.095 ms; 19696 tx/s serial
-sync        NORMAL insert_or_get, paced 100 tx/s  5000   0.196   0.279  ms    p99 0.418 ms
-claim       claim(20) @ 0 ready                    250   0.021   0.025  ms
-claim       claim(20) exec @ 0 ready               250   0.013   0.016  ms    CLAIM_SQL without COMMIT; COMMIT median 0.003 ms
-recover     recover_expired @ 0 ready              250   0.017   0.021  ms    60 valid leases, none expired (no write)
-claim       claim(20) @ 10000 ready                250   0.468   0.623  ms
-claim       claim(20) exec @ 10000 ready           250   0.045   0.051  ms    CLAIM_SQL without COMMIT; COMMIT median 0.360 ms
-recover     recover_expired @ 10000 ready          250   0.009   0.011  ms    60 valid leases, none expired (no write)
-claim       claim(20) @ 100000 ready               250   0.464   0.637  ms
-claim       claim(20) exec @ 100000 ready          250   0.046   0.053  ms    CLAIM_SQL without COMMIT; COMMIT median 0.360 ms
+----------  ------------------------------------  ----  ------  ------  ----  ----------------------------------------------------------------------------------------------------------------------------------
+sync        FULL insert_or_get, flat out          5000   0.419   0.624  ms    p99 0.915 ms; 2171 tx/s serial
+sync        FULL insert_or_get, paced 100 tx/s    5000   2.059   3.084  ms    p99 5.496 ms
+sync        NORMAL insert_or_get, flat out        5000   0.024   0.062  ms    p99 0.115 ms; 20790 tx/s serial
+sync        NORMAL insert_or_get, paced 100 tx/s  5000   0.206   0.308  ms    p99 0.459 ms
+claim       claim(20) @ 0 ready                    250   0.009   0.011  ms
+claim       claim(20) exec @ 0 ready               250   0.005   0.005  ms    CLAIM_SQL without COMMIT; COMMIT median 0.001 ms
+recover     recover_expired @ 0 ready              250   0.009   0.011  ms    60 valid leases, none expired (no write)
+claim       claim(20) @ 10000 ready                250   0.484   0.641  ms
+claim       claim(20) exec @ 10000 ready           250   0.047   0.053  ms    CLAIM_SQL without COMMIT; COMMIT median 0.374 ms
+recover     recover_expired @ 10000 ready          250   0.009   0.012  ms    60 valid leases, none expired (no write)
+claim       claim(20) @ 100000 ready               250   0.479   0.651  ms
+claim       claim(20) exec @ 100000 ready          250   0.048   0.055  ms    CLAIM_SQL without COMMIT; COMMIT median 0.370 ms
 recover     recover_expired @ 100000 ready         250   0.009   0.012  ms    60 valid leases, none expired (no write)
-contention  1 writer proc(s)                         5  2337.1  2381.7  tx/s  p95 = max (n=5); per proc median 2337 (min 2165, max 2382) tx/s; max tx 189 ms; SQLITE_BUSY 0; window max 10.00 s
-contention  2 writer proc(s)                         5  2250.1  2326.0  tx/s  p95 = max (n=5); per proc median 770 (min 56, max 2282) tx/s; max tx 7527 ms; SQLITE_BUSY 4; window max 13.57 s
-contention  4 writer proc(s)                         5  2173.0  2336.2  tx/s  p95 = max (n=5); per proc median 480 (min 0, max 2155) tx/s; max tx 5130 ms; SQLITE_BUSY 12; window max 10.13 s
-contention  8 writer proc(s)                         5  2207.5  2252.2  tx/s  p95 = max (n=5); per proc median 144 (min 0, max 1159) tx/s; max tx 5178 ms; SQLITE_BUSY 27; window max 10.27 s
-retention   payload clear batch 1000                50   1.837   2.334  ms    10000 eligible + 100000 recent rows
-retention   delete batch 1000                       50   2.027   6.359  ms    10000 eligible + 100000 recent rows
-retention   purge() 10000 eligible                   5  44.613  45.941  ms    p95 = max (n=5); 20 batches; 10000 eligible + 100000 recent rows
+contention  1 writer proc(s)                         5  2264.3  2383.5  tx/s  p95 = max (n=5); per proc median 2264 (min 1889, max 2384) tx/s; max tx 259 ms; SQLITE_BUSY 0; late commits 5; overrun max 0.00 s
+contention  2 writer proc(s)                         5  2254.7  2364.3  tx/s  p95 = max (n=5); per proc median 1131 (min 207, max 2158) tx/s; max tx 5129 ms; SQLITE_BUSY 4; late commits 10; overrun max 0.11 s
+contention  4 writer proc(s)                         5  2280.3  2399.3  tx/s  p95 = max (n=5); per proc median 567 (min 0, max 1492) tx/s; max tx 5146 ms; SQLITE_BUSY 10; late commits 20; overrun max 0.10 s
+contention  8 writer proc(s)                         5  2197.0  2293.6  tx/s  p95 = max (n=5); per proc median 180 (min 0, max 1065) tx/s; max tx 5126 ms; SQLITE_BUSY 27; late commits 40; overrun max 0.17 s
+retention   payload clear batch 1000                50   1.936   2.432  ms    10000 eligible + 100000 recent rows
+retention   delete batch 1000                       50   2.073   6.084  ms    10000 eligible + 100000 recent rows
+retention   purge() 10000 eligible                   5  48.574  49.316  ms    p95 = max (n=5); 20 batches; 10000 eligible + 100000 recent rows
 
 EXPLAIN QUERY PLAN
   claim @ 100000: SEARCH webhook_events USING INTEGER PRIMARY KEY (rowid=?); LIST SUBQUERY 1; SEARCH webhook_events USING COVERING INDEX ix_events_ready (run_at<?)
