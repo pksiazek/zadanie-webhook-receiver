@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import multiprocessing
+import random
 import shutil
 import sqlite3
 import statistics
@@ -351,18 +352,24 @@ def _claim_cycle(
     return recover, claim, executed - start, committed - executed
 
 
+CLAIM_SEED = 15  # fixed seed of the per-round size order
+
+
 def bench_claim(
     base: Path, repeat: int, sizes: Sizes
 ) -> tuple[list[Result], list[str]]:
     """``claim(20)`` and ``recover_expired`` at several queue sizes.
 
-    Each size is populated once (``size`` due ``pending`` rows plus
-    ``LEASED_ROWS`` valid leases). After every claim the claimed rows
-    are put back to ``pending`` (untimed), so every claim sees exactly
-    ``size`` ready rows. Before timing, ``claim_warmup`` untimed cycles
-    run: the 0-ready case never writes, so without them the first size
-    that commits pays for a cold storage/fsync path (measured: ~3x
-    slower COMMIT for whichever size runs first).
+    One database per size is populated up front (``size`` due
+    ``pending`` rows plus ``LEASED_ROWS`` valid leases) and all stay
+    open. After every claim the claimed rows are put back to
+    ``pending`` (untimed), so every claim sees exactly ``size`` ready
+    rows. Each database first gets ``claim_warmup`` untimed cycles (the
+    0-ready case never writes, so otherwise the first size that commits
+    pays for a cold fsync path). Timed cycles are then interleaved: in
+    every round each size runs one cycle, in a shuffled order (fixed
+    seed), so a slow phase of the host hits all sizes alike instead of
+    whichever size happens to run during it.
 
     Besides the whole ``claim()``, the claim statement is timed alone
     (``exec``, no COMMIT) to separate the query cost, which is what the
@@ -373,36 +380,50 @@ def bench_claim(
     live on stay hot in the page cache. This shows the cost does not
     depend on the size of the ready set; it is not a draining queue.
     """
-    results: list[Result] = []
-    plans: list[str] = []
     clock = SystemClock()
-    for size in sizes.claim_sizes:
-        pool = ConnectionPool(fresh_db(base, f"claim-{size}"))
-        try:
+    pools: dict[int, ConnectionPool] = {}
+    ready_at = clock.now_ms() - 60_000
+    try:
+        for size in sizes.claim_sizes:
+            log(f"claim {size}: populate")
+            pool = pools[size] = ConnectionPool(
+                fresh_db(base, f"claim-{size}")
+            )
             conn = pool.get()
-            now = clock.now_ms()
-            ready_at = now - 60_000
             bulk_insert(conn, "ready", size, "pending", ready_at)
             bulk_insert(
                 conn,
                 "leased",
                 LEASED_ROWS,
                 "processing",
-                now + 3_600_000,
+                clock.now_ms() + 3_600_000,
                 attempts=1,
             )
             conn.execute("ANALYZE")
-            repo = EventRepository(pool, clock)
+        repos = {n: EventRepository(p, clock) for n, p in pools.items()}
+        for size in sizes.claim_sizes:
             log(f"claim {size}: warm-up {sizes.claim_warmup} cycles")
             for _ in range(sizes.claim_warmup):
-                _claim_cycle(repo, conn, size, ready_at)
-            samples: list[tuple[float, float, float, float]] = []
-            for rep in range(repeat):
-                log(f"claim {size}: run {rep + 1}/{repeat}")
-                for _ in range(sizes.claims_per_repeat):
-                    samples.append(_claim_cycle(repo, conn, size, ready_at))
+                _claim_cycle(repos[size], pools[size].get(), size, ready_at)
+        samples: dict[int, list[tuple[float, float, float, float]]] = {
+            n: [] for n in sizes.claim_sizes
+        }
+        order = list(sizes.claim_sizes)
+        shuffle = random.Random(CLAIM_SEED).shuffle
+        for rep in range(repeat):
+            log(f"claim (all sizes interleaved): run {rep + 1}/{repeat}")
+            for _ in range(sizes.claims_per_repeat):
+                shuffle(order)
+                for size in order:
+                    samples[size].append(
+                        _claim_cycle(
+                            repos[size], pools[size].get(), size, ready_at
+                        )
+                    )
+        results: list[Result] = []
+        for size in sizes.claim_sizes:
             recovers, claims, execs, commits = (
-                list(c) for c in zip(*samples, strict=True)
+                list(c) for c in zip(*samples[size], strict=True)
             )
             commit_median = statistics.median(commits) * 1000
             results += [
@@ -421,24 +442,26 @@ def bench_claim(
                     f"{LEASED_ROWS} valid leases, none expired (no write)",
                 ),
             ]
-            if size == sizes.claim_sizes[-1]:
-                params = {
-                    "now": now,
-                    "lease": LEASE_MS,
-                    "limit": CLAIM_LIMIT,
-                    "max": MAX_ATTEMPTS,
-                }
-                for name, sql in (
-                    ("claim", CLAIM_SQL),
-                    ("recover retry", RECOVER_RETRY_SQL),
-                    ("recover fail", RECOVER_FAIL_SQL),
-                ):
-                    plans.append(
-                        f"{name} @ {size}: {query_plan(conn, sql, params)}"
-                    )
-        finally:
+        largest = sizes.claim_sizes[-1]
+        params = {
+            "now": clock.now_ms(),
+            "lease": LEASE_MS,
+            "limit": CLAIM_LIMIT,
+            "max": MAX_ATTEMPTS,
+        }
+        plans = [
+            f"{name} @ {largest}:"
+            f" {query_plan(pools[largest].get(), sql, params)}"
+            for name, sql in (
+                ("claim", CLAIM_SQL),
+                ("recover retry", RECOVER_RETRY_SQL),
+                ("recover fail", RECOVER_FAIL_SQL),
+            )
+        ]
+        return results, plans
+    finally:
+        for pool in pools.values():
             pool.close_all()
-    return results, plans
 
 
 # --- 3. write contention between processes --------------------------------
@@ -452,6 +475,7 @@ class WriterReport:
     writer_id: int
     count: int
     busy: int
+    late: int  # commits that finished after the deadline (not counted)
     worst_s: float  # slowest insert_or_get, failed ones included
     start: float  # time.monotonic() at barrier release (system-wide)
     end: float
@@ -469,20 +493,25 @@ def _writer(
         repo = EventRepository(pool, SystemClock())
         pool.get()  # connect before the start line
         barrier.wait(timeout=BARRIER_TIMEOUT_S)
-        count = busy = 0
+        count = busy = late = 0
         worst = 0.0
         begin = time.monotonic()
         deadline = begin + seconds
         while (start := time.monotonic()) < deadline:
             try:
                 repo.insert_or_get(
-                    f"w{writer_id}-{count}-{busy}",
+                    f"w{writer_id}-{count}-{busy}-{late}",
                     "bench",
                     "order.created",
                     PAYLOAD,
                     None,
                 )
-                count += 1
+                # Only commits inside [begin, deadline] count: a stalled
+                # last transaction must not stretch the window.
+                if time.monotonic() <= deadline:
+                    count += 1
+                else:
+                    late += 1
             except sqlite3.OperationalError as exc:
                 # SQLITE_BUSY once busy_timeout (5 s) runs out: the busy
                 # handler polls with backoff and is not fair, so a writer
@@ -492,7 +521,7 @@ def _writer(
                 busy += 1
             worst = max(worst, time.monotonic() - start)
         report = WriterReport(
-            writer_id, count, busy, worst, begin, time.monotonic()
+            writer_id, count, busy, late, worst, begin, time.monotonic()
         )
         results.put(("ok", report))
     except BaseException as exc:
@@ -561,29 +590,30 @@ def run_writers(
 def bench_contention(base: Path, repeat: int, sizes: Sizes) -> list[Result]:
     """Write throughput of 1..N processes looping ``insert_or_get``.
 
-    Rates are divided by the measured window: barrier release of the
-    first writer to the end of the last one (per process: its own).
+    Every writer counts only the commits that finish within ``seconds``
+    of its barrier release; rates divide by the nominal ``seconds``. A
+    transaction stalled past the deadline is not counted, but shows up
+    in "max tx" and "overrun" (last writer end minus the deadline).
     """
     seconds = sizes.contention_seconds
     out = []
     for writers in sizes.writer_counts:
         totals: list[float] = []
         per_proc: list[float] = []
-        windows: list[float] = []
-        busy = 0
-        worst = 0.0
+        busy = late = 0
+        worst = overrun = 0.0
         for rep in range(repeat):
             log(f"contention {writers} procs: run {rep + 1}/{repeat}")
             path = fresh_db(base, f"contention-{writers}")
             reports = run_writers(path, writers, seconds)
-            window = max(r.end for r in reports) - min(
-                r.start for r in reports
-            )
-            windows.append(window)
-            totals.append(sum(r.count for r in reports) / window)
-            per_proc.extend(r.count / (r.end - r.start) for r in reports)
+            totals.append(sum(r.count for r in reports) / seconds)
+            per_proc.extend(r.count / seconds for r in reports)
             busy += sum(r.busy for r in reports)
+            late += sum(r.late for r in reports)
             worst = max(worst, *(r.worst_s for r in reports))
+            overrun = max(
+                overrun, *(r.end - r.start - seconds for r in reports)
+            )
         out.append(
             Result(
                 "contention",
@@ -595,7 +625,7 @@ def bench_contention(base: Path, repeat: int, sizes: Sizes) -> list[Result]:
                 f"per proc median {statistics.median(per_proc):.0f}"
                 f" (min {min(per_proc):.0f}, max {max(per_proc):.0f}) tx/s;"
                 f" max tx {worst * 1000:.0f} ms; SQLITE_BUSY {busy};"
-                f" window max {max(windows):.2f} s",
+                f" late commits {late}; overrun max {overrun:.2f} s",
             )
         )
     return out
