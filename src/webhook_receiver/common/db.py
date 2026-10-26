@@ -34,6 +34,9 @@ CREATE INDEX IF NOT EXISTS ix_events_leased ON webhook_events (run_at)
 CREATE INDEX IF NOT EXISTS ix_events_finished
     ON webhook_events (status, finished_at)
     WHERE finished_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_events_purgeable
+    ON webhook_events (finished_at)
+    WHERE status = 'completed' AND payload_json IS NOT NULL;
 """
 
 
@@ -134,18 +137,24 @@ class ConnectionPool:
         self._path = path
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._all: list[sqlite3.Connection] = []
+        # Connection -> owner thread, so connections of threads that have
+        # exited (e.g. idle anyio workers) can be closed.
+        self._all: dict[sqlite3.Connection, threading.Thread] = {}
 
     def get(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
             # Safe: the connection is handed out only to the thread that
-            # created it (threading.local); the single cross-thread access
-            # is close_all() at shutdown.
+            # created it (threading.local); the cross-thread accesses are
+            # closing it once that thread is dead, and close_all().
             conn = connect(self._path, check_same_thread=False)
             self._local.conn = conn
             with self._lock:
-                self._all.append(conn)
+                for old, owner in list(self._all.items()):
+                    if not owner.is_alive():
+                        old.close()
+                        del self._all[old]
+                self._all[conn] = threading.current_thread()
         return conn
 
     def close_all(self) -> None:

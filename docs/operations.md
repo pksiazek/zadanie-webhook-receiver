@@ -8,6 +8,7 @@ Dla operatora i oceniającego: demonstracje zachowania (awaria workera, restart 
 
 - [Demonstracje](#demonstracje)
 - [Pętla restartów przy błędzie konfiguracji](#pętla-restartów-przy-błędzie-konfiguracji)
+- [Zatrzymanie (`docker compose stop`)](#zatrzymanie-docker-compose-stop)
 - [API — szczegóły](#api--szczegóły)
 - [Przejścia statusów](#przejścia-statusów)
 - [Obserwowalność](#obserwowalność)
@@ -92,6 +93,12 @@ daje **pętlę restartów**, widoczną w `docker compose ps` (status
 `Restarting`) i w `docker compose logs <usługa>` (błąd walidacji
 konfiguracji).
 
+## Zatrzymanie (`docker compose stop`)
+
+Workery po SIGTERM kończą trwające próby (do `SHUTDOWN_GRACE_SECONDS`) i
+kończą się kodem 0. `api` kończy się kodem 143 — uvicorn po czystym
+zamknięciu ponownie zgłasza SIGTERM; to nie jest błąd.
+
 ## API — szczegóły
 
 ### `POST /webhooks`
@@ -121,13 +128,20 @@ Nagłówki: `Content-Type: application/json`, **`X-Source`** (wymagany,
 więc nadawcę trzeba znać; dodatkowo służy jako etykieta w metrykach, logach
 i śladach. Nie jest częścią tożsamości zdarzenia: w wierszu zapisywane jest
 źródło pierwszego zgłoszenia, ponowienie z innego źródła to zwykły
-duplikat. Kubełki trzyma LRU ograniczone do `RATE_LIMIT_MAX_SOURCES`
-(10 000) źródeł, żeby dowolne wartości nagłówka nie powiększały pamięci bez
-końca. Konsekwencja: przy ponad 10 000 aktywnych źródeł najdawniej używany
-kubełek jest usuwany, a jego źródło wraca z pełnym kubełkiem (burst) — przy
-celowym zalewie losowymi `X-Source` limit per źródło przestaje chronić.
-Limit działa w obrębie jednego procesu API (patrz
-[jeden proces uvicorn](tradeoffs.md#jeden-proces-uvicorn)).
+duplikat.
+
+- **Pamięć limitera jest ograniczona.** Kubełki trzyma LRU do
+  `RATE_LIMIT_MAX_SOURCES` (10 000) źródeł, więc dowolne wartości nagłówka
+  nie powiększają jej bez końca.
+- **Konsekwencja LRU:** przy ponad 10 000 aktywnych źródeł najdawniej
+  używany kubełek jest usuwany, a jego źródło wraca z pełnym kubełkiem
+  (burst). Przy celowym zalewie losowymi `X-Source` limit per źródło
+  przestaje chronić.
+- **Metryki nie są ograniczone.** `webhooks_received_total` ma osobną serię
+  dla każdej wartości `X-Source`, więc nieuwierzytelniony nadawca może
+  dowolnie zwiększać ich liczbę (→ [TODO](../README.md#todo)).
+- **Jeden proces:** limit działa w obrębie jednego procesu API (patrz
+  [jeden proces uvicorn](tradeoffs.md#jeden-proces-uvicorn)).
 
 ### `GET /webhooks/{idempotency_key}`
 
@@ -286,7 +300,8 @@ Jaegerze), a wpisy o zdarzeniach także `event` oraz — zależnie od rodzaju �
 `idempotency_key`, `source`, `worker_id`, `attempt`; wartości `event`:
 `accepted`, `duplicate`, `rate_limited`, `backpressure`, `db_busy`,
 `invalid`, `claimed`, `attempt`, `lease_recovered`, `stale_result`,
-`retention`. Payload i wynik nigdy nie trafiają do logów.
+`retention`. Payload i wynik nigdy nie trafiają do logów. Log dostępu
+uvicorna jest wyłączony (żądania opisują wpisy `event` i ślady).
 
 ```bash
 docker compose logs --no-log-prefix api | grep '"idempotency_key": "evt-001"'

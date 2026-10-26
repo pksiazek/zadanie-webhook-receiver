@@ -133,6 +133,21 @@ def test_purge_clears_payload_after_7_days(repo, clock):
     assert repo.purge(POLICY) == PurgeResult(0, 0, 0)
 
 
+def test_purge_payload_clears_only_eligible_rows(repo, clock):
+    _completed(repo, "old")
+    _failed(repo, "failed")
+    clock.advance(8 * DAY)
+    _completed(repo, "fresh")
+    _add(repo, "pending")  # after the claims, so they do not pick it
+    assert repo.purge(POLICY) == PurgeResult(1, 0, 0)
+    assert repo.get("old").payload is None
+    assert repo.get("failed").payload == {"k": "failed"}
+    assert repo.get("pending").payload == {"k": "pending"}
+    fresh = repo.get("fresh")
+    assert fresh.payload == {"k": "fresh"}
+    assert fresh.result == {"ok": "fresh"}
+
+
 def test_purge_deletes_completed_after_30_days(repo, clock):
     _completed(repo, "a")
     clock.advance(30 * DAY)
@@ -241,7 +256,12 @@ def test_purge_works_in_batches(repo, clock):
         assert repo.get(f"f{i}") is None
 
 
-PARTIAL_INDEXES = ("ix_events_ready", "ix_events_leased", "ix_events_finished")
+PARTIAL_INDEXES = (
+    "ix_events_ready",
+    "ix_events_leased",
+    "ix_events_finished",
+    "ix_events_purgeable",
+)
 
 
 def _is_full_scan(detail: str) -> bool:
@@ -276,7 +296,7 @@ def test_stats_and_purge_queries_use_indexes(repo):
         (STATS_PROCESSING_SQL, "ix_events_leased"),
         (OLDEST_READY_SQL, "ix_events_ready"),
         (OLDEST_LEASED_SQL, "ix_events_leased"),
-        (PURGE_PAYLOAD_SQL, "ix_events_finished"),
+        (PURGE_PAYLOAD_SQL, "ix_events_purgeable"),
         (PURGE_COMPLETED_SQL, "ix_events_finished"),
         (PURGE_FAILED_SQL, "ix_events_finished"),
     ]
@@ -291,5 +311,13 @@ def test_stats_and_purge_queries_use_indexes(repo):
             assert any(
                 d.startswith("SEARCH webhook_events")
                 and f"INDEX {index} (status=?" in d
+                for d in details
+            ), (sql, details)
+        if index == "ix_events_purgeable":
+            # Seek by finished_at among rows that still hold a payload;
+            # already-purged rows are not in the index at all.
+            assert any(
+                d.startswith("SEARCH webhook_events")
+                and f"INDEX {index} (finished_at<?)" in d
                 for d in details
             ), (sql, details)

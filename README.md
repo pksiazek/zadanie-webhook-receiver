@@ -280,7 +280,8 @@ Uwagi do tabeli:
 
 - token bucket per `X-Source`, w pamięci procesu API,
 - 50 żądań/s, burst 100,
-- kubełki w LRU do 10 000 źródeł,
+- kubełki w LRU do 10 000 źródeł (ogranicza pamięć limitera, nie liczbę
+  serii metryk per `source` → [TODO](#todo)),
 - limit działa w obrębie jednego procesu API.
 
 Szczegóły, `Retry-After`, pola odpowiedzi `GET` i endpointy operacyjne →
@@ -362,7 +363,7 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 Źródło: [`results/benchmarks.txt`](results/benchmarks.txt).
 
 - **`synchronous=FULL` kosztuje ok. 2 ms na zapis przy 100 tx/s**
-  (mediana 2,059 ms; bez przerw 0,419 ms). `NORMAL`: 0,206 ms.
+  (mediana 1,998 ms; bez przerw 0,442 ms). `NORMAL`: 0,195 ms.
   Liczby `FULL` mogą być optymistyczne (fsync w maszynie wirtualnej na
   macOS).
 - **Rezerwacja nie zależy od długości kolejki** (do 100 000). Samo
@@ -374,6 +375,8 @@ Pełne tabele, środowisko i interpretacja → [docs/results.md](docs/results.md
 - **Test obciążeniowy zużywał ≤ ~50 tx/s, ok. 2% pułapu** (szacunek) —
   stąd liniowe skalowanie.
 - **Porcja retencji (1000 wierszy) trzyma blokadę ok. 2 ms.**
+  Także przy 100 000 już wyczyszczonych wierszy (indeks
+  `ix_events_purgeable`; wcześniej koszt rósł z ich liczbą).
 
 ## Założenia skalowalności
 
@@ -447,7 +450,8 @@ Każdy punkt ma rozwinięcie w [docs/tradeoffs.md](docs/tradeoffs.md).
 
   To rozwiązuje też problem kluczy `.` i `..`.
 - **Uwierzytelnianie nadawców:** podpisy HMAC zamiast zaufania do
-  `X-Source`.
+  `X-Source`; ograniczenie kardynalności `source` w metrykach (dziś każda
+  wartość nagłówka to nowa seria).
 - **Poziome skalowanie API:** współdzielony rate limit (np. Redis) i cache
   statystyk — wiele procesów uvicorn / instancji.
 - **Wyjście poza jeden host i jednego pisarza SQLite:** PostgreSQL
@@ -485,7 +489,7 @@ loadtest/       generator obciążenia (steady, burst, flood, scaling-report)
 benchmarks/     benchmarki SQLite (sync, claim, contention, retention)
 scripts/        scaling.sh
 results/        wyniki testu obciążeniowego i benchmarków
-docs/           configuration.md, operations.md, results.md, tradeoffs.md, superpowers/specs/
+docs/           configuration.md, operations.md, results.md, tradeoffs.md, superpowers/specs/, superpowers/plans/
 ```
 
 - `otel-collector.yaml` — konfiguracja Collectora.

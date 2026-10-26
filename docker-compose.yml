@@ -115,6 +115,7 @@ services:
     # Jaeger v2 all-in-one; fed with traces by the Collector over OTLP
     # gRPC (4317, on by default).
     image: jaegertracing/jaeger:2.22.0
+    restart: unless-stopped
     ports:
       - "${JAEGER_UI_PORT:-16686}:16686"
 

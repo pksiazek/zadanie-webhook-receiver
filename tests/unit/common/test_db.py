@@ -117,9 +117,12 @@ def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, open_db):
             "SELECT name FROM sqlite_master WHERE type = 'index'"
         )
     }
-    assert {"ix_events_ready", "ix_events_leased", "ix_events_finished"} <= (
-        names
-    )
+    assert {
+        "ix_events_ready",
+        "ix_events_leased",
+        "ix_events_finished",
+        "ix_events_purgeable",
+    } <= names
     sql = {
         r["name"]: " ".join(r["sql"].split())
         for r in conn.execute(
@@ -132,6 +135,9 @@ def test_init_schema_creates_indexes_and_is_idempotent(tmp_path, open_db):
     )
     assert sql["ix_events_leased"].endswith("WHERE status = 'processing'")
     assert sql["ix_events_finished"].endswith("WHERE finished_at IS NOT NULL")
+    assert sql["ix_events_purgeable"].endswith(
+        "(finished_at) WHERE status = 'completed' AND payload_json IS NOT NULL"
+    )
 
 
 def test_init_schema_concurrent(tmp_path, open_db):
@@ -171,6 +177,42 @@ def test_pool_returns_connection_per_thread(tmp_path):
     pool.close_all()
     with pytest.raises(sqlite3.ProgrammingError):
         main.execute("SELECT 1")
+
+
+def test_pool_closes_connections_of_dead_threads(tmp_path):
+    pool = ConnectionPool(tmp_path / "a.db")
+    dead = []
+    t = threading.Thread(target=lambda: dead.append(pool.get()))
+    t.start()
+    _join_all([t])
+    main = pool.get()  # a new connection prunes the dead thread's one
+    with pytest.raises(sqlite3.ProgrammingError):
+        dead[0].execute("SELECT 1")
+    assert list(pool._all) == [main]
+    pool.close_all()
+
+
+def test_pool_keeps_connections_of_live_threads(tmp_path):
+    pool = ConnectionPool(tmp_path / "a.db")
+    got, release = threading.Event(), threading.Event()
+    live = []
+
+    def hold():
+        live.append(pool.get())
+        got.set()
+        release.wait(timeout=10)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert got.wait(timeout=10)
+    try:
+        main = pool.get()
+        assert live[0].execute("SELECT 1").fetchone()[0] == 1
+        assert list(pool._all) == [live[0], main]
+    finally:
+        release.set()
+        _join_all([t])
+    pool.close_all()
 
 
 def test_event_payload_purged():

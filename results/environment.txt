@@ -20,6 +20,6 @@ git base: f76ba79
 host: same as the load test (Apple Silicon, 10 cores, OrbStack Linux VM, devcontainer with docker-in-docker)
 command: docker compose run --rm --no-deps -T -v bench-data:/data --entrypoint python loadtest -W error -m benchmarks.sqlite_bench all --dir /data/bench --repeat 5
 storage: Docker named volume bench-data at /data (same kind as webhook-data); df -T: /dev/vdb1 btrfs (docker root on overlayfs)
-image: webhook-receiver:local sha256:ef35b8d1143b (python 3.14.9, sqlite 3.46.1)
+image: webhook-receiver:local sha256:8cfaf55c90e0 (python 3.14.9, sqlite 3.46.1)
 multiprocessing start method: spawn
-git base: af31f85 (benchmark code, after Task 15 review round 3)
+git base: 5f8cb43 (fix/final-review: partial index for payload purge, retention case with already-purged rows)
