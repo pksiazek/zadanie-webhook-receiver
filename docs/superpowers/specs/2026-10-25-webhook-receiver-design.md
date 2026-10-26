@@ -195,6 +195,7 @@ Odpowiedzi:
 | brak `X-Source` | `400` | opis błędu |
 | przekroczony limit nadawcy | `429` + `Retry-After` [ustalone] | opis |
 | przekroczony próg zaległości (backpressure) | `503` + `Retry-After` [decyzja projektanta] | opis |
+| chwilowa rywalizacja o zapis w SQLite (`SQLITE_BUSY`/`SQLITE_LOCKED` po `busy_timeout`) | `503` + `Retry-After` [ustalone — po benchmarkach Task 15] | opis (bez treści błędu bazy) |
 
 **Kolejność kontroli w `POST`** [ustalone — po recenzji Task 9]:
 rozmiar (`413`, middleware obejmujące całą aplikację — za duże body
@@ -206,6 +207,11 @@ istnieje: **duplikat dostaje `200` z aktualnym statusem, a nie `503`**
 [ustalone] — nie dodaje pracy, a nadawca w pętli ponowień nie pogłębia
 zalewu. `503` dostają tylko nowe zdarzenia. `Retry-After` dla `503`:
 stała konfigurowalna (domyślnie 5 s) [decyzja projektanta].
+Rywalizacja o blokadę zapisu (`SQLITE_BUSY`/`SQLITE_LOCKED`, także kody
+rozszerzone) przy zapisie zdarzenia lub przy sprawdzaniu duplikatu w
+gałęzi backpressure daje ten sam `503` z tym samym `Retry-After`; pozostałe
+błędy bazy (np. I/O, uszkodzony plik) pozostają `500` [ustalone — po
+benchmarkach Task 15].
 
 **Duplikat = ten sam `idempotency_key`, niezależnie od treści** [ustalone —
 dosłownie wg zadania]. Treść ponowienia nie jest porównywana; zwracany jest
@@ -547,7 +553,7 @@ build SQLite).
     od `POST` przez wszystkie próby.
   - Atrybuty spanów nie zawierają payloadu (dane osobowe).
 - **Metryki** (OTel SDK, eksport Prometheus na `/metrics`):
-  - `webhooks_received_total{source, outcome=accepted|duplicate|rate_limited|backpressure|invalid}`
+  - `webhooks_received_total{source, outcome=accepted|duplicate|rate_limited|backpressure|db_busy|invalid}`
   - `webhook_processing_duration_seconds` (histogram), `{outcome}`
   - `webhook_attempts_total{outcome=success|retry|failed}`
   - `webhook_queue_depth{status}` — gauge tylko dla `pending`, `retrying`,
